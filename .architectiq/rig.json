@@ -1,0 +1,4447 @@
+{
+  "nodes": [
+    {
+      "kind": "module",
+      "name": "analytics.py",
+      "properties": {
+        "role": "service",
+        "language": "python",
+        "exports": [
+          "compute_statistics",
+          "compute_student_scores",
+          "generate_graph",
+          "generate_summary",
+          "run_full_analytics"
+        ],
+        "classes": [],
+        "functions": [
+          "_read_log",
+          "_read_student_log",
+          "compute_statistics",
+          "compute_student_scores",
+          "generate_graph",
+          "generate_summary",
+          "run_full_analytics"
+        ],
+        "isEntry": false,
+        "path": "analytics.py",
+        "external": false,
+        "contentPreview": "# ============================================================\n# analytics.py — Analytics Engine\n# ============================================================\n\nimport os, csv, math\nfrom datetime import datetime\n\ntry:\n    import matplotlib; matplotlib.use(\"Agg\")\n    import matplotlib.pyplot as plt\n    import matplotlib.dates as mdates\n    MPL = True\nexcept ImportError:\n    MPL = False\n    print(\"[analytics] matplotlib not installed — graph skipped.\")\n\nLOG_PATH         = \"data/attention_log.csv\"\nSTUDENT_LOG_PATH = \"data/student_log.csv\"\nGRAPH_PATH       = \"outputs/attention_graph.png\"\nSUMMARY_PATH     = \"outputs/summary.txt\"\n\n\ndef _read_log(path=LOG_PATH):\n    if not os.path.exists(path): return []\n    rows=[]\n    with open(path,newline=\"\") as f:\n        for r in csv.DictReader(f):\n            try:\n                r[\"attention_percentage\"]=float(r[\"attention_percentage\"])\n                r[\"total_students\"]=int(r[\"total_students\"])\n                r[\"attentive_count\"]=int(r[\"attentive_count\"])\n                r[\"distracted_count\"]=int(r[\"distracted_count\"])\n                rows.append(r)\n            except: continue\n    return rows\n\n\ndef _read_student_log(path=STUDENT_LOG_PATH):\n    if not os.path.exists(path): return {}\n    hist={}\n    with open(path,newline=\"\") as f:\n        for r in csv.DictReader(f):\n            hist.setdefault(r.get(\"track_id\",\"?\"),[]).append(r.get(\"state\",\"Unknown\"))\n    return hist\n\n\ndef compute_statistics(log_path=LOG_PATH):\n    rows=_read_log(log_path"
+      },
+      "evidence": [
+        "analytics.py"
+      ],
+      "id": "module:cc7f523500403f26"
+    },
+    {
+      "kind": "module",
+      "name": "dashboard.py",
+      "properties": {
+        "role": "api-route",
+        "language": "python",
+        "exports": [
+          "index",
+          "summary_api",
+          "print_live_dashboard",
+          "update_student",
+          "start_web_dashboard",
+          "run_final_dashboard"
+        ],
+        "classes": [],
+        "functions": [
+          "index",
+          "summary_api",
+          "print_live_dashboard",
+          "update_student",
+          "start_web_dashboard",
+          "_run",
+          "run_final_dashboard"
+        ],
+        "isEntry": true,
+        "path": "dashboard.py",
+        "external": false,
+        "contentPreview": "# ============================================================\n# dashboard.py — Web Dashboard (Flask + SocketIO)\n# Changes vs previous version:\n#   • Removed top5/bot5 student lists\n#   • Summary shows per-student average attentiveness table\n#   • Summary shows exact time of peak and lowest attention\n#   • /summary route so browser always shows final summary\n#     even if the tab was opened after 'q' was pressed\n# ============================================================\n\nimport threading\nimport webbrowser\nfrom datetime import datetime\nfrom flask import Flask, render_template_string, jsonify\nfrom flask_socketio import SocketIO\nfrom analytics import (compute_statistics, compute_student_scores,\n                        generate_graph, generate_summary)\nfrom utils import print_section\n\nLOG_PATH         = \"data/attention_log.csv\"\nSTUDENT_LOG_PATH = \"data/student_log.csv\"\nGRAPH_PATH       = \"outputs/attention_graph.png\"\nSUMMARY_PATH     = \"outputs/summary.txt\"\nWEB_PORT         = 5000\nDISTRACTION_THRESHOLD = 50.0   # % — below this = distraction event\n\napp      = Flask(__name__)\nsocketio = SocketIO(app, cors_allowed_origins=\"*\", async_mode=\"threading\")\n\n_state = {\n    \"pct\": 0.0, \"avg_pct\": 0.0,\n    \"attentive\": 0, \"total\": 0,\n    \"fps\": 0.0, \"start_time\": \"—\",\n    \"students\": {},        # { \"id\": {\"current\", \"history\", \"att_count\", \"total_count\"} }\n    \"timeline\": [],        # [{\"time\", \"pct\"}, ...]\n    \"distraction_log\": [], # [{\"time\", \"pct\"}, ...]\n    # track running peak/low"
+      },
+      "evidence": [
+        "dashboard.py"
+      ],
+      "id": "module:cd508892bb740b72"
+    },
+    {
+      "kind": "module",
+      "name": "logger.py",
+      "properties": {
+        "role": "service",
+        "language": "python",
+        "exports": [
+          "AttentionLogger"
+        ],
+        "classes": [
+          "AttentionLogger"
+        ],
+        "functions": [
+          "__init__",
+          "_ensure_file",
+          "log_attention",
+          "log_student_state"
+        ],
+        "isEntry": false,
+        "path": "logger.py",
+        "external": false,
+        "contentPreview": "# =========================================================\n# logger.py — CLASS-BASED ATTENTION LOGGER (FINAL FIX)\n# =========================================================\n\nimport csv\nimport os\nimport time\nfrom datetime import datetime\n\nclass AttentionLogger:\n\n    def __init__(self, interval=3):\n        self.interval = interval\n        self.last_log_time = time.time()\n        self.log_file = \"data/attention_log.csv\"\n\n        self._ensure_file()\n\n    # -------------------------------\n    # CREATE FILE IF NOT EXISTS\n    # -------------------------------\n    def _ensure_file(self):\n        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)\n\n        if not os.path.exists(self.log_file):\n            with open(self.log_file, \"w\", newline=\"\") as f:\n                writer = csv.writer(f)\n                writer.writerow([\n                    \"timestamp\",\n                    \"attention_percentage\",\n                    \"total_students\",\n                    \"attentive_count\",\n                    \"distracted_count\"\n                ])\n\n    # -------------------------------\n    # LOG CLASS ATTENTION\n    # -------------------------------\n    def log_attention(self, data):\n\n        current_time = time.time()\n\n        if current_time - self.last_log_time < self.interval:\n            return False\n\n        total = data.get(\"total_students\", 0)\n        attentive = data.get(\"attentive_count\", 0)\n        distracted = total - attentive\n\n        percentage = (attentive / total * 100) if to"
+      },
+      "evidence": [
+        "logger.py"
+      ],
+      "id": "module:ea7cb5eaec19ba9b"
+    },
+    {
+      "kind": "module",
+      "name": "main.py",
+      "properties": {
+        "role": "service",
+        "language": "python",
+        "exports": [
+          "detect_persons",
+          "update_tracker",
+          "get_attention_state",
+          "main"
+        ],
+        "classes": [],
+        "functions": [
+          "detect_persons",
+          "update_tracker",
+          "get_attention_state",
+          "_smooth",
+          "main"
+        ],
+        "isEntry": false,
+        "path": "main.py",
+        "external": false,
+        "contentPreview": "import cv2\nimport sys\nfrom datetime import datetime\n\n# ── Project modules ───────────────────────────────────────────────────────────\nfrom logger    import AttentionLogger\nfrom dashboard import (start_web_dashboard, update_student,\n                        print_live_dashboard, run_final_dashboard)\nfrom privacy   import blur_faces\nfrom utils     import (FPSCounter, draw_person_box, draw_hud, ensure_dirs)\n\n# Instantiate logger (handles 2-second time-gating internally)\n_logger = AttentionLogger()\n\n# ── Config ────────────────────────────────────────────────────────────────────\nCAMERA_INDEX      = 0\nFRAME_WIDTH       = 1280\nFRAME_HEIGHT      = 720\nYOLO_MODEL        = \"yolov8n.pt\"\nYOLO_CONF         = 0.4\nYOLO_DEVICE       = \"cuda\"\nSMOOTHING_WINDOW  = 5\nPRIVACY_ENABLED   = True\nWINDOW_TITLE      = \"ClassWatch — Privacy-Aware Attention System\"\n\nYAW_THRESHOLD   = 30\nPITCH_THRESHOLD = 25\n\n# ── YOLO + MediaPipe setup ───────────────────────────────────────────────────\nimport numpy as np\nfrom ultralytics import YOLO\nimport mediapipe as mp\n\n_model      = YOLO(YOLO_MODEL)\n_model.to(YOLO_DEVICE)\n\n_mp_fd      = mp.solutions.face_detection\n_mp_fm      = mp.solutions.face_mesh\n_face_det   = _mp_fd.FaceDetection(model_selection=1, min_detection_confidence=0.3)\n_face_mesh  = _mp_fm.FaceMesh(refine_landmarks=True, max_num_faces=1)\n\n# Track IDs assigned by ByteTrack across frames\n_track_id_map = {}\n\n\ndef detect_persons(frame):\n    results = _model.track(\n    frame, persist=True,\n    tracker=\"byte"
+      },
+      "evidence": [
+        "main.py"
+      ],
+      "id": "module:f1bdda93d9a278e3"
+    },
+    {
+      "kind": "module",
+      "name": "person_detection.py",
+      "properties": {
+        "role": "service",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "person_detection.py",
+        "external": false,
+        "contentPreview": "import cv2\r\nfrom ultralytics import YOLO\r\nimport time\r\n\r\n# -------------------------------\r\n# Load YOLO model onto GPU\r\n# -------------------------------\r\n# yolov8n.pt = lightweight model (fast, good for real-time)\r\nmodel = YOLO(\"yolov8n.pt\")\r\n\r\n# Move model to GPU (CUDA) for faster processing\r\nmodel.to(\"cuda\")\r\n\r\n# -------------------------------\r\n# Start webcam capture\r\n# -------------------------------\r\ncap = cv2.VideoCapture(0)  # 0 = default webcam\r\n\r\n# -------------------------------\r\n# Timer setup (to avoid spam prints)\r\n# -------------------------------\r\nlast_print_time = time.time()  # store last print time\r\nprint_interval = 3             # print every 3 seconds\r\n\r\n# -------------------------------\r\n# Main loop (runs continuously)\r\n# -------------------------------\r\nwhile True:\r\n    ret, frame = cap.read()   # capture frame from webcam\r\n\r\n    if not ret:\r\n        break  # exit if camera fails\r\n\r\n    # Resize frame → improves speed + consistency\r\n    frame = cv2.resize(frame, (640, 480))\r\n\r\n    # -------------------------------\r\n    # Run YOLO detection\r\n    # -------------------------------\r\n    # conf=0.4 → ignore weak detections (reduces false positives)\r\n    results = model(frame, conf=0.4)\r\n\r\n    person_count = 0  # counter for detected people\r\n\r\n    # -------------------------------\r\n    # Loop through detections\r\n    # -------------------------------\r\n    for r in results:\r\n        for box in r.boxes:\r\n\r\n            # Class ID 0 = \"person\" (from COCO dataset)\r\n"
+      },
+      "evidence": [
+        "person_detection.py"
+      ],
+      "id": "module:1b28000d2664de80"
+    },
+    {
+      "kind": "module",
+      "name": "phase2_tracking.py",
+      "properties": {
+        "role": "service",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "phase2_tracking.py",
+        "external": false,
+        "contentPreview": "import cv2\r\nfrom ultralytics import YOLO\r\nimport mediapipe as mp\r\n\r\n# -------------------------------\r\n# LOAD MODELS\r\n# -------------------------------\r\n\r\n# YOLO model → detects + tracks people\r\nmodel = YOLO(\"yolov8n.pt\")\r\n\r\n# Move model to GPU (faster)\r\nmodel.to(\"cuda\")\r\n\r\n# MediaPipe Pose → gives body keypoints\r\nmp_pose = mp.solutions.pose\r\npose = mp_pose.Pose()\r\n\r\n# -------------------------------\r\n# START CAMERA\r\n# -------------------------------\r\ncap = cv2.VideoCapture(0)\r\n\r\n# -------------------------------\r\n# PARAMETERS (TUNING)\r\n# -------------------------------\r\nTHRESHOLD = 50  # higher = less sensitive (try 40–70)\r\n\r\n# Memory for smoothing direction per person\r\ndirection_memory = {}\r\n\r\n# -------------------------------\r\n# MAIN LOOP (runs continuously)\r\n# -------------------------------\r\nwhile True:\r\n    ret, frame = cap.read()\r\n    if not ret:\r\n        break\r\n\r\n    # Resize for faster processing\r\n    frame = cv2.resize(frame, (640, 480))\r\n\r\n    # -------------------------------\r\n    # YOLO TRACKING\r\n    # -------------------------------\r\n    results = model.track(\r\n        frame,\r\n        persist=True,\r\n        tracker=\"bytetrack.yaml\",\r\n        conf=0.5\r\n    )\r\n\r\n    # Counters for analytics\r\n    attentive_count = 0\r\n    total_count = 0\r\n\r\n    # -------------------------------\r\n    # PROCESS EACH DETECTED PERSON\r\n    # -------------------------------\r\n    for r in results:\r\n        if r.boxes is None:\r\n            continue\r\n\r\n        for box in r.boxes:\r\n\r\n        "
+      },
+      "evidence": [
+        "phase2_tracking.py"
+      ],
+      "id": "module:03dc86aad99a20dc"
+    },
+    {
+      "kind": "module",
+      "name": "phase4_advanced_attention.py",
+      "properties": {
+        "role": "service",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "phase4_advanced_attention.py",
+        "external": false,
+        "contentPreview": "# =========================================================\r\n# FINAL STABLE ATTENTION SYSTEM (CLASSROOM FRIENDLY)\r\n# YOLO + FACE DETECTION + FACE MESH + SIMPLIFIED ATTENTION\r\n# =========================================================\r\n\r\nimport cv2\r\nfrom ultralytics import YOLO\r\nimport mediapipe as mp\r\nimport numpy as np\r\n\r\n# -------------------------------\r\n# LOAD YOLO MODEL (BETTER DETECTION)\r\n# -------------------------------\r\nmodel = YOLO(\"yolov8m.pt\")\r\nmodel.to(\"cuda\")\r\n\r\n# -------------------------------\r\n# FACE DETECTION\r\n# -------------------------------\r\nmp_face_detection = mp.solutions.face_detection\r\nface_detection = mp_face_detection.FaceDetection(\r\n    model_selection=1,   # better for far faces\r\n    min_detection_confidence=0.3\r\n)\r\n\r\n# -------------------------------\r\n# FACE MESH\r\n# -------------------------------\r\nmp_face_mesh = mp.solutions.face_mesh\r\nface_mesh = mp_face_mesh.FaceMesh(refine_landmarks=True)\r\n\r\n# -------------------------------\r\n# MEMORY FOR SMOOTHING\r\n# -------------------------------\r\nattention_memory = {}\r\n\r\n# -------------------------------\r\n# START CAMERA\r\n# -------------------------------\r\ncap = cv2.VideoCapture(0)\r\n\r\nwhile True:\r\n    ret, frame = cap.read()\r\n    if not ret:\r\n        break\r\n\r\n    # Higher resolution (important)\r\n    frame = cv2.resize(frame, (1280, 720))\r\n\r\n    # -------------------------------\r\n    # YOLO TRACKING\r\n    # -------------------------------\r\n    results = model.track(\r\n        frame,\r\n        persist=True,\r\n "
+      },
+      "evidence": [
+        "phase4_advanced_attention.py"
+      ],
+      "id": "module:e9263f7f1591a5c8"
+    },
+    {
+      "kind": "module",
+      "name": "privacy.py",
+      "properties": {
+        "role": "service",
+        "language": "python",
+        "exports": [
+          "blur_faces"
+        ],
+        "classes": [],
+        "functions": [
+          "blur_faces"
+        ],
+        "isEntry": false,
+        "path": "privacy.py",
+        "external": false,
+        "contentPreview": "# ============================================================\n# privacy.py — Privacy Layer (MediaPipe face detection + blur)\n# Uses actual face landmarks so the blur hits the real face,\n# not a rough top-35% bbox estimate.\n# NO face images are ever stored.\n# ============================================================\n\nimport cv2\nimport numpy as np\n\n# ── MediaPipe face detection (accurate region) ───────────────\ntry:\n    import mediapipe as mp\n    _mp_fd   = mp.solutions.face_detection\n    _face_det = _mp_fd.FaceDetection(model_selection=1,\n                                      min_detection_confidence=0.4)\n    _USE_MP = True\nexcept Exception:\n    _USE_MP = False\n    print(\"[privacy] MediaPipe unavailable — falling back to bbox estimate.\")\n\n# ── Blur settings ─────────────────────────────────────────────\nBLUR_KERNEL  = (61, 61)   # must be odd; larger = stronger blur\nBLUR_SIGMA   = 25\nBLUR_PAD     = 10         # extra pixels around detected face box\n\n\ndef blur_faces(frame: np.ndarray, detections: list) -> np.ndarray:\n    \"\"\"\n    Blur face regions inside each person bounding box.\n    detections: list of dicts with keys x1, y1, x2, y2\n\n    Strategy:\n      1. Crop the person region.\n      2. Run MediaPipe face detection on that crop to get the real face bbox.\n      3. Apply Gaussian blur to the face bbox (+ padding) only.\n      4. If MediaPipe finds no face, fall back to blurring the upper-30% of\n         the person crop (better than nothing, still no face stored).\n    \"\"\"\n    "
+      },
+      "evidence": [
+        "privacy.py"
+      ],
+      "id": "module:89be1e9eb936cf02"
+    },
+    {
+      "kind": "module",
+      "name": "utils.py",
+      "properties": {
+        "role": "service",
+        "language": "python",
+        "exports": [
+          "ensure_dirs",
+          "draw_hud",
+          "draw_person_box",
+          "print_section",
+          "print_live_status",
+          "timestamp_str",
+          "safe_crop",
+          "FPSCounter"
+        ],
+        "classes": [
+          "FPSCounter"
+        ],
+        "functions": [
+          "ensure_dirs",
+          "__init__",
+          "tick",
+          "draw_hud",
+          "draw_person_box",
+          "print_section",
+          "print_live_status",
+          "timestamp_str",
+          "safe_crop"
+        ],
+        "isEntry": false,
+        "path": "utils.py",
+        "external": false,
+        "contentPreview": "# ============================================================\n# utils.py — Shared Helper Utilities\n# ============================================================\n\nimport os, cv2, time, numpy as np\nfrom datetime import datetime\nfrom collections import deque\n\n\ndef ensure_dirs(*paths):\n    for p in paths:\n        os.makedirs(p, exist_ok=True)\n\n\nclass FPSCounter:\n    def __init__(self, window=30):\n        self._times = deque(maxlen=window)\n\n    def tick(self):\n        self._times.append(time.perf_counter())\n        if len(self._times) < 2:\n            return 0.0\n        return round((len(self._times)-1)/(self._times[-1]-self._times[0]), 1)\n\n\ndef draw_hud(frame, attentive, total, fps, privacy_on=True):\n    if frame is None or frame.size == 0:\n        return frame\n    pct = round(attentive/total*100, 1) if total > 0 else 0.0\n    h, w = frame.shape[:2]\n    overlay = frame.copy()\n    cv2.rectangle(overlay, (0,0), (w,50), (10,10,15), -1)\n    cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)\n    colour = (0,220,130) if pct>75 else (0,210,250) if pct>40 else (60,60,255)\n    cv2.putText(frame, f\"Attention: {attentive}/{total}  ({pct}%)\",\n                (14,32), cv2.FONT_HERSHEY_SIMPLEX, 0.75, colour, 2)\n    cv2.putText(frame, f\"FPS: {fps}\", (w-110,32),\n                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180,180,180), 1)\n    if privacy_on:\n        cv2.putText(frame, \"PRIVACY ON\", (w-230,32),\n                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,200,100), 1)\n    return frame\n\n\ndef draw_p"
+      },
+      "evidence": [
+        "utils.py"
+      ],
+      "id": "module:5031d0ea937a7fcb"
+    },
+    {
+      "id": "module:89ffad089c042f31",
+      "kind": "module",
+      "name": "datetime",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "datetime",
+        "external": true
+      },
+      "evidence": [
+        "analytics.py"
+      ]
+    },
+    {
+      "id": "module:999a3419d9959d3c",
+      "kind": "module",
+      "name": "os",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "os",
+        "external": true
+      },
+      "evidence": [
+        "analytics.py"
+      ]
+    },
+    {
+      "id": "module:6cc981744e5c8931",
+      "kind": "module",
+      "name": "csv",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "csv",
+        "external": true
+      },
+      "evidence": [
+        "analytics.py"
+      ]
+    },
+    {
+      "id": "module:3b19138ffe0227df",
+      "kind": "module",
+      "name": "math\nfrom datetime import datetime",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "math\nfrom datetime import datetime",
+        "external": true
+      },
+      "evidence": [
+        "analytics.py"
+      ]
+    },
+    {
+      "id": "module:e8439a6b8f01e74d",
+      "kind": "module",
+      "name": "flask",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "flask",
+        "external": true
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "id": "module:fe469cff4302461b",
+      "kind": "module",
+      "name": "flask_socketio",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "flask_socketio",
+        "external": true
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "id": "module:80f1488e4b56e78a",
+      "kind": "module",
+      "name": "threading\nimport webbrowser\nfrom datetime import datetime\nfrom flask import Flask",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "threading\nimport webbrowser\nfrom datetime import datetime\nfrom flask import Flask",
+        "external": true
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "id": "module:1e45c9e72781e5b9",
+      "kind": "module",
+      "name": "render_template_string",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "render_template_string",
+        "external": true
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "id": "module:092609b54be36139",
+      "kind": "module",
+      "name": "jsonify\nfrom flask_socketio import SocketIO",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "jsonify\nfrom flask_socketio import SocketIO",
+        "external": true
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "id": "module:8eccecc1ded4fad5",
+      "kind": "module",
+      "name": "csv\nimport os\nimport time\nfrom datetime import datetime",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "csv\nimport os\nimport time\nfrom datetime import datetime",
+        "external": true
+      },
+      "evidence": [
+        "logger.py"
+      ]
+    },
+    {
+      "id": "module:bf9b5528377b2600",
+      "kind": "module",
+      "name": "ultralytics",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "ultralytics",
+        "external": true
+      },
+      "evidence": [
+        "main.py"
+      ]
+    },
+    {
+      "id": "module:601e4c3e92ff443c",
+      "kind": "module",
+      "name": "cv2\nimport sys\nfrom datetime import datetime",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "cv2\nimport sys\nfrom datetime import datetime",
+        "external": true
+      },
+      "evidence": [
+        "main.py"
+      ]
+    },
+    {
+      "id": "module:a65e1d3845cf3b10",
+      "kind": "module",
+      "name": "numpy",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "numpy",
+        "external": true
+      },
+      "evidence": [
+        "main.py"
+      ]
+    },
+    {
+      "id": "module:24cfc7f756ebc654",
+      "kind": "module",
+      "name": "cv2\r\nfrom ultralytics import YOLO\r\nimport time",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "cv2\r\nfrom ultralytics import YOLO\r\nimport time",
+        "external": true
+      },
+      "evidence": [
+        "person_detection.py"
+      ]
+    },
+    {
+      "id": "module:10f61edf2a328500",
+      "kind": "module",
+      "name": "cv2\r\nfrom ultralytics import YOLO\r\nimport mediapipe",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "cv2\r\nfrom ultralytics import YOLO\r\nimport mediapipe",
+        "external": true
+      },
+      "evidence": [
+        "phase2_tracking.py"
+      ]
+    },
+    {
+      "id": "module:e113a6290b2e60b4",
+      "kind": "module",
+      "name": "cv2\nimport numpy",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "cv2\nimport numpy",
+        "external": true
+      },
+      "evidence": [
+        "privacy.py"
+      ]
+    },
+    {
+      "id": "module:fa4b9d69fdddc7c1",
+      "kind": "module",
+      "name": "collections",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "collections",
+        "external": true
+      },
+      "evidence": [
+        "utils.py"
+      ]
+    },
+    {
+      "id": "module:fd3024fcdba2cfe9",
+      "kind": "module",
+      "name": "cv2",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "cv2",
+        "external": true
+      },
+      "evidence": [
+        "utils.py"
+      ]
+    },
+    {
+      "id": "module:714eea0f4c980736",
+      "kind": "module",
+      "name": "time",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "time",
+        "external": true
+      },
+      "evidence": [
+        "utils.py"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "source": "module:cc7f523500403f26",
+      "target": "module:89ffad089c042f31",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "analytics.py"
+      ]
+    },
+    {
+      "source": "module:cc7f523500403f26",
+      "target": "module:999a3419d9959d3c",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "analytics.py"
+      ]
+    },
+    {
+      "source": "module:cc7f523500403f26",
+      "target": "module:6cc981744e5c8931",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "analytics.py"
+      ]
+    },
+    {
+      "source": "module:cc7f523500403f26",
+      "target": "module:3b19138ffe0227df",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "analytics.py"
+      ]
+    },
+    {
+      "source": "module:cd508892bb740b72",
+      "target": "module:89ffad089c042f31",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "source": "module:cd508892bb740b72",
+      "target": "module:e8439a6b8f01e74d",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "source": "module:cd508892bb740b72",
+      "target": "module:fe469cff4302461b",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "source": "module:cd508892bb740b72",
+      "target": "module:cc7f523500403f26",
+      "relation": "imports",
+      "properties": {
+        "confidence": "high",
+        "evidence_type": "ast"
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "source": "module:cd508892bb740b72",
+      "target": "module:5031d0ea937a7fcb",
+      "relation": "imports",
+      "properties": {
+        "confidence": "high",
+        "evidence_type": "ast"
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "source": "module:cd508892bb740b72",
+      "target": "module:80f1488e4b56e78a",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "source": "module:cd508892bb740b72",
+      "target": "module:1e45c9e72781e5b9",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "source": "module:cd508892bb740b72",
+      "target": "module:092609b54be36139",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "source": "module:ea7cb5eaec19ba9b",
+      "target": "module:89ffad089c042f31",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "logger.py"
+      ]
+    },
+    {
+      "source": "module:ea7cb5eaec19ba9b",
+      "target": "module:8eccecc1ded4fad5",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "logger.py"
+      ]
+    },
+    {
+      "source": "module:f1bdda93d9a278e3",
+      "target": "module:89ffad089c042f31",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "main.py"
+      ]
+    },
+    {
+      "source": "module:f1bdda93d9a278e3",
+      "target": "module:ea7cb5eaec19ba9b",
+      "relation": "imports",
+      "properties": {
+        "confidence": "high",
+        "evidence_type": "ast"
+      },
+      "evidence": [
+        "main.py"
+      ]
+    },
+    {
+      "source": "module:f1bdda93d9a278e3",
+      "target": "module:cd508892bb740b72",
+      "relation": "imports",
+      "properties": {
+        "confidence": "high",
+        "evidence_type": "ast"
+      },
+      "evidence": [
+        "main.py"
+      ]
+    },
+    {
+      "source": "module:f1bdda93d9a278e3",
+      "target": "module:89be1e9eb936cf02",
+      "relation": "imports",
+      "properties": {
+        "confidence": "high",
+        "evidence_type": "ast"
+      },
+      "evidence": [
+        "main.py"
+      ]
+    },
+    {
+      "source": "module:f1bdda93d9a278e3",
+      "target": "module:5031d0ea937a7fcb",
+      "relation": "imports",
+      "properties": {
+        "confidence": "high",
+        "evidence_type": "ast"
+      },
+      "evidence": [
+        "main.py"
+      ]
+    },
+    {
+      "source": "module:f1bdda93d9a278e3",
+      "target": "module:bf9b5528377b2600",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "main.py"
+      ]
+    },
+    {
+      "source": "module:f1bdda93d9a278e3",
+      "target": "module:601e4c3e92ff443c",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "main.py"
+      ]
+    },
+    {
+      "source": "module:f1bdda93d9a278e3",
+      "target": "module:a65e1d3845cf3b10",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "main.py"
+      ]
+    },
+    {
+      "source": "module:1b28000d2664de80",
+      "target": "module:bf9b5528377b2600",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "person_detection.py"
+      ]
+    },
+    {
+      "source": "module:1b28000d2664de80",
+      "target": "module:24cfc7f756ebc654",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "person_detection.py"
+      ]
+    },
+    {
+      "source": "module:03dc86aad99a20dc",
+      "target": "module:bf9b5528377b2600",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "phase2_tracking.py"
+      ]
+    },
+    {
+      "source": "module:03dc86aad99a20dc",
+      "target": "module:10f61edf2a328500",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "phase2_tracking.py"
+      ]
+    },
+    {
+      "source": "module:e9263f7f1591a5c8",
+      "target": "module:bf9b5528377b2600",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "phase4_advanced_attention.py"
+      ]
+    },
+    {
+      "source": "module:e9263f7f1591a5c8",
+      "target": "module:10f61edf2a328500",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "phase4_advanced_attention.py"
+      ]
+    },
+    {
+      "source": "module:89be1e9eb936cf02",
+      "target": "module:e113a6290b2e60b4",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "privacy.py"
+      ]
+    },
+    {
+      "source": "module:5031d0ea937a7fcb",
+      "target": "module:89ffad089c042f31",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "utils.py"
+      ]
+    },
+    {
+      "source": "module:5031d0ea937a7fcb",
+      "target": "module:fa4b9d69fdddc7c1",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "utils.py"
+      ]
+    },
+    {
+      "source": "module:5031d0ea937a7fcb",
+      "target": "module:999a3419d9959d3c",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "utils.py"
+      ]
+    },
+    {
+      "source": "module:5031d0ea937a7fcb",
+      "target": "module:fd3024fcdba2cfe9",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "utils.py"
+      ]
+    },
+    {
+      "source": "module:5031d0ea937a7fcb",
+      "target": "module:714eea0f4c980736",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "utils.py"
+      ]
+    },
+    {
+      "source": "module:5031d0ea937a7fcb",
+      "target": "module:a65e1d3845cf3b10",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "utils.py"
+      ]
+    }
+  ],
+  "metadata": {
+    "generated_at": "2026-03-30T05:27:16.327Z",
+    "workspace_root": "c:\\Users\\Saksham Midha\\Documents\\Attention-Analysis",
+    "node_count": 28,
+    "edge_count": 35,
+    "stack": "Python Flask · imports: relative imports",
+    "file_hash": "292c0479e87b6875",
+    "confidence_counts": {
+      "high": 6,
+      "medium": 0,
+      "low": 29
+    }
+  },
+  "intelligence": {
+    "codeGraph": {
+      "nodes": [
+        {
+          "id": "FILE::analytics.py",
+          "type": "FILE",
+          "name": "analytics.py",
+          "file": "analytics.py"
+        },
+        {
+          "id": "FUNCTION::analytics.py::_read_log:23",
+          "type": "FUNCTION",
+          "name": "analytics._read_log",
+          "file": "analytics.py",
+          "start_line": 23,
+          "end_line": 35,
+          "metadata": {
+            "simpleName": "_read_log",
+            "qualifiedName": "analytics._read_log",
+            "clusterId": 1
+          }
+        },
+        {
+          "id": "FUNCTION::analytics.py::_read_student_log:38",
+          "type": "FUNCTION",
+          "name": "analytics._read_student_log",
+          "file": "analytics.py",
+          "start_line": 38,
+          "end_line": 44,
+          "metadata": {
+            "simpleName": "_read_student_log",
+            "qualifiedName": "analytics._read_student_log",
+            "clusterId": 2
+          }
+        },
+        {
+          "id": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "FUNCTION",
+          "name": "analytics.compute_statistics",
+          "file": "analytics.py",
+          "start_line": 47,
+          "end_line": 61,
+          "metadata": {
+            "simpleName": "compute_statistics",
+            "qualifiedName": "analytics.compute_statistics",
+            "clusterId": 3
+          }
+        },
+        {
+          "id": "FUNCTION::analytics.py::compute_student_scores:64",
+          "type": "FUNCTION",
+          "name": "analytics.compute_student_scores",
+          "file": "analytics.py",
+          "start_line": 64,
+          "end_line": 67,
+          "metadata": {
+            "simpleName": "compute_student_scores",
+            "qualifiedName": "analytics.compute_student_scores",
+            "clusterId": 3
+          }
+        },
+        {
+          "id": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "FUNCTION",
+          "name": "analytics.generate_graph",
+          "file": "analytics.py",
+          "start_line": 70,
+          "end_line": 106,
+          "metadata": {
+            "simpleName": "generate_graph",
+            "qualifiedName": "analytics.generate_graph",
+            "clusterId": 3
+          }
+        },
+        {
+          "id": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "FUNCTION",
+          "name": "analytics.generate_summary",
+          "file": "analytics.py",
+          "start_line": 109,
+          "end_line": 131,
+          "metadata": {
+            "simpleName": "generate_summary",
+            "qualifiedName": "analytics.generate_summary",
+            "clusterId": 3
+          }
+        },
+        {
+          "id": "FUNCTION::analytics.py::run_full_analytics:134",
+          "type": "FUNCTION",
+          "name": "analytics.run_full_analytics",
+          "file": "analytics.py",
+          "start_line": 134,
+          "end_line": 137,
+          "metadata": {
+            "simpleName": "run_full_analytics",
+            "qualifiedName": "analytics.run_full_analytics",
+            "clusterId": 3
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::LOG_PATH:23",
+          "type": "VARIABLE",
+          "name": "LOG_PATH",
+          "file": "analytics.py",
+          "start_line": 23,
+          "end_line": 23,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::os:24",
+          "type": "VARIABLE",
+          "name": "os",
+          "file": "analytics.py",
+          "start_line": 24,
+          "end_line": 24,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::path:24",
+          "type": "VARIABLE",
+          "name": "path",
+          "file": "analytics.py",
+          "start_line": 24,
+          "end_line": 24,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::rows:25",
+          "type": "VARIABLE",
+          "name": "rows",
+          "file": "analytics.py",
+          "start_line": 25,
+          "end_line": 25,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::open:26",
+          "type": "VARIABLE",
+          "name": "open",
+          "file": "analytics.py",
+          "start_line": 26,
+          "end_line": 26,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::csv:27",
+          "type": "VARIABLE",
+          "name": "csv",
+          "file": "analytics.py",
+          "start_line": 27,
+          "end_line": 27,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::f:27",
+          "type": "VARIABLE",
+          "name": "f",
+          "file": "analytics.py",
+          "start_line": 27,
+          "end_line": 27,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::r:29",
+          "type": "VARIABLE",
+          "name": "r",
+          "file": "analytics.py",
+          "start_line": 29,
+          "end_line": 29,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::float:29",
+          "type": "VARIABLE",
+          "name": "float",
+          "file": "analytics.py",
+          "start_line": 29,
+          "end_line": 29,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::int:30",
+          "type": "VARIABLE",
+          "name": "int",
+          "file": "analytics.py",
+          "start_line": 30,
+          "end_line": 30,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::STUDENT_LOG_PATH:38",
+          "type": "VARIABLE",
+          "name": "STUDENT_LOG_PATH",
+          "file": "analytics.py",
+          "start_line": 38,
+          "end_line": 38,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::hist:40",
+          "type": "VARIABLE",
+          "name": "hist",
+          "file": "analytics.py",
+          "start_line": 40,
+          "end_line": 40,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::_read_log:48",
+          "type": "VARIABLE",
+          "name": "_read_log",
+          "file": "analytics.py",
+          "start_line": 48,
+          "end_line": 48,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::log_path:48",
+          "type": "VARIABLE",
+          "name": "log_path",
+          "file": "analytics.py",
+          "start_line": 48,
+          "end_line": 48,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::pcts:50",
+          "type": "VARIABLE",
+          "name": "pcts",
+          "file": "analytics.py",
+          "start_line": 50,
+          "end_line": 50,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::avg:51",
+          "type": "VARIABLE",
+          "name": "avg",
+          "file": "analytics.py",
+          "start_line": 51,
+          "end_line": 51,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::round:51",
+          "type": "VARIABLE",
+          "name": "round",
+          "file": "analytics.py",
+          "start_line": 51,
+          "end_line": 51,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::sum:51",
+          "type": "VARIABLE",
+          "name": "sum",
+          "file": "analytics.py",
+          "start_line": 51,
+          "end_line": 51,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::len:51",
+          "type": "VARIABLE",
+          "name": "len",
+          "file": "analytics.py",
+          "start_line": 51,
+          "end_line": 51,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::max_att:52",
+          "type": "VARIABLE",
+          "name": "max_att",
+          "file": "analytics.py",
+          "start_line": 52,
+          "end_line": 52,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::max:52",
+          "type": "VARIABLE",
+          "name": "max",
+          "file": "analytics.py",
+          "start_line": 52,
+          "end_line": 52,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::min_att:52",
+          "type": "VARIABLE",
+          "name": "min_att",
+          "file": "analytics.py",
+          "start_line": 52,
+          "end_line": 52,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::min:52",
+          "type": "VARIABLE",
+          "name": "min",
+          "file": "analytics.py",
+          "start_line": 52,
+          "end_line": 52,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::max_total:53",
+          "type": "VARIABLE",
+          "name": "max_total",
+          "file": "analytics.py",
+          "start_line": 53,
+          "end_line": 53,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::drops:54",
+          "type": "VARIABLE",
+          "name": "drops",
+          "file": "analytics.py",
+          "start_line": 54,
+          "end_line": 54,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::i:54",
+          "type": "VARIABLE",
+          "name": "i",
+          "file": "analytics.py",
+          "start_line": 54,
+          "end_line": 54,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::range:54",
+          "type": "VARIABLE",
+          "name": "range",
+          "file": "analytics.py",
+          "start_line": 54,
+          "end_line": 54,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::max_drop:55",
+          "type": "VARIABLE",
+          "name": "max_drop",
+          "file": "analytics.py",
+          "start_line": 55,
+          "end_line": 55,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::mean:56",
+          "type": "VARIABLE",
+          "name": "mean",
+          "file": "analytics.py",
+          "start_line": 56,
+          "end_line": 56,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::stdev:57",
+          "type": "VARIABLE",
+          "name": "stdev",
+          "file": "analytics.py",
+          "start_line": 57,
+          "end_line": 57,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::math:57",
+          "type": "VARIABLE",
+          "name": "math",
+          "file": "analytics.py",
+          "start_line": 57,
+          "end_line": 57,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::p:57",
+          "type": "VARIABLE",
+          "name": "p",
+          "file": "analytics.py",
+          "start_line": 57,
+          "end_line": 57,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::stability:58",
+          "type": "VARIABLE",
+          "name": "stability",
+          "file": "analytics.py",
+          "start_line": 58,
+          "end_line": 58,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::_read_student_log:65",
+          "type": "VARIABLE",
+          "name": "_read_student_log",
+          "file": "analytics.py",
+          "start_line": 65,
+          "end_line": 65,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::tid:66",
+          "type": "VARIABLE",
+          "name": "tid",
+          "file": "analytics.py",
+          "start_line": 66,
+          "end_line": 66,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::states:66",
+          "type": "VARIABLE",
+          "name": "states",
+          "file": "analytics.py",
+          "start_line": 66,
+          "end_line": 66,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::s:66",
+          "type": "VARIABLE",
+          "name": "s",
+          "file": "analytics.py",
+          "start_line": 66,
+          "end_line": 66,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::GRAPH_PATH:70",
+          "type": "VARIABLE",
+          "name": "GRAPH_PATH",
+          "file": "analytics.py",
+          "start_line": 70,
+          "end_line": 70,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::MPL:71",
+          "type": "VARIABLE",
+          "name": "MPL",
+          "file": "analytics.py",
+          "start_line": 71,
+          "end_line": 71,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::print:73",
+          "type": "VARIABLE",
+          "name": "print",
+          "file": "analytics.py",
+          "start_line": 73,
+          "end_line": 73,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::graph_path:74",
+          "type": "VARIABLE",
+          "name": "graph_path",
+          "file": "analytics.py",
+          "start_line": 74,
+          "end_line": 74,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::timestamps:75",
+          "type": "VARIABLE",
+          "name": "timestamps",
+          "file": "analytics.py",
+          "start_line": 75,
+          "end_line": 75,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::times:77",
+          "type": "VARIABLE",
+          "name": "times",
+          "file": "analytics.py",
+          "start_line": 77,
+          "end_line": 77,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::datetime:77",
+          "type": "VARIABLE",
+          "name": "datetime",
+          "file": "analytics.py",
+          "start_line": 77,
+          "end_line": 77,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::t:77",
+          "type": "VARIABLE",
+          "name": "t",
+          "file": "analytics.py",
+          "start_line": 77,
+          "end_line": 77,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::list:78",
+          "type": "VARIABLE",
+          "name": "list",
+          "file": "analytics.py",
+          "start_line": 78,
+          "end_line": 78,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::max_pct:79",
+          "type": "VARIABLE",
+          "name": "max_pct",
+          "file": "analytics.py",
+          "start_line": 79,
+          "end_line": 79,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::min_pct:79",
+          "type": "VARIABLE",
+          "name": "min_pct",
+          "file": "analytics.py",
+          "start_line": 79,
+          "end_line": 79,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::max_i:80",
+          "type": "VARIABLE",
+          "name": "max_i",
+          "file": "analytics.py",
+          "start_line": 80,
+          "end_line": 80,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::min_i:80",
+          "type": "VARIABLE",
+          "name": "min_i",
+          "file": "analytics.py",
+          "start_line": 80,
+          "end_line": 80,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::plt:81",
+          "type": "VARIABLE",
+          "name": "plt",
+          "file": "analytics.py",
+          "start_line": 81,
+          "end_line": 81,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::fig:82",
+          "type": "VARIABLE",
+          "name": "fig",
+          "file": "analytics.py",
+          "start_line": 82,
+          "end_line": 82,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::ax:82",
+          "type": "VARIABLE",
+          "name": "ax",
+          "file": "analytics.py",
+          "start_line": 82,
+          "end_line": 82,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::isinstance:99",
+          "type": "VARIABLE",
+          "name": "isinstance",
+          "file": "analytics.py",
+          "start_line": 99,
+          "end_line": 99,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::mdates:100",
+          "type": "VARIABLE",
+          "name": "mdates",
+          "file": "analytics.py",
+          "start_line": 100,
+          "end_line": 100,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::SUMMARY_PATH:109",
+          "type": "VARIABLE",
+          "name": "SUMMARY_PATH",
+          "file": "analytics.py",
+          "start_line": 109,
+          "end_line": 109,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::summary_path:110",
+          "type": "VARIABLE",
+          "name": "summary_path",
+          "file": "analytics.py",
+          "start_line": 110,
+          "end_line": 110,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::sorted_s:111",
+          "type": "VARIABLE",
+          "name": "sorted_s",
+          "file": "analytics.py",
+          "start_line": 111,
+          "end_line": 111,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::sorted:111",
+          "type": "VARIABLE",
+          "name": "sorted",
+          "file": "analytics.py",
+          "start_line": 111,
+          "end_line": 111,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::student_scores:111",
+          "type": "VARIABLE",
+          "name": "student_scores",
+          "file": "analytics.py",
+          "start_line": 111,
+          "end_line": 111,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::x:111",
+          "type": "VARIABLE",
+          "name": "x",
+          "file": "analytics.py",
+          "start_line": 111,
+          "end_line": 111,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::top5:112",
+          "type": "VARIABLE",
+          "name": "top5",
+          "file": "analytics.py",
+          "start_line": 112,
+          "end_line": 112,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::bottom5:112",
+          "type": "VARIABLE",
+          "name": "bottom5",
+          "file": "analytics.py",
+          "start_line": 112,
+          "end_line": 112,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::lines:113",
+          "type": "VARIABLE",
+          "name": "lines",
+          "file": "analytics.py",
+          "start_line": 113,
+          "end_line": 113,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::stats:116",
+          "type": "VARIABLE",
+          "name": "stats",
+          "file": "analytics.py",
+          "start_line": 116,
+          "end_line": 116,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::enumerate:124",
+          "type": "VARIABLE",
+          "name": "enumerate",
+          "file": "analytics.py",
+          "start_line": 124,
+          "end_line": 124,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::sc:124",
+          "type": "VARIABLE",
+          "name": "sc",
+          "file": "analytics.py",
+          "start_line": 124,
+          "end_line": 124,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::content:128",
+          "type": "VARIABLE",
+          "name": "content",
+          "file": "analytics.py",
+          "start_line": 128,
+          "end_line": 128,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::compute_statistics:136",
+          "type": "VARIABLE",
+          "name": "compute_statistics",
+          "file": "analytics.py",
+          "start_line": 136,
+          "end_line": 136,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::compute_student_scores:136",
+          "type": "VARIABLE",
+          "name": "compute_student_scores",
+          "file": "analytics.py",
+          "start_line": 136,
+          "end_line": 136,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::generate_graph:137",
+          "type": "VARIABLE",
+          "name": "generate_graph",
+          "file": "analytics.py",
+          "start_line": 137,
+          "end_line": 137,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::analytics.py::generate_summary:137",
+          "type": "VARIABLE",
+          "name": "generate_summary",
+          "file": "analytics.py",
+          "start_line": 137,
+          "end_line": 137,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "FILE::dashboard.py",
+          "type": "FILE",
+          "name": "dashboard.py",
+          "file": "dashboard.py"
+        },
+        {
+          "id": "FILE::logger.py",
+          "type": "FILE",
+          "name": "logger.py",
+          "file": "logger.py"
+        },
+        {
+          "id": "CLASS::logger.py::AttentionLogger:10",
+          "type": "CLASS",
+          "name": "AttentionLogger",
+          "file": "logger.py",
+          "start_line": 10,
+          "end_line": 80
+        },
+        {
+          "id": "FUNCTION::logger.py::__init__:12",
+          "type": "FUNCTION",
+          "name": "logger.__init__",
+          "file": "logger.py",
+          "start_line": 12,
+          "end_line": 17,
+          "metadata": {
+            "simpleName": "__init__",
+            "qualifiedName": "logger.__init__",
+            "clusterId": 4
+          }
+        },
+        {
+          "id": "FUNCTION::logger.py::_ensure_file:22",
+          "type": "FUNCTION",
+          "name": "logger._ensure_file",
+          "file": "logger.py",
+          "start_line": 22,
+          "end_line": 34,
+          "metadata": {
+            "simpleName": "_ensure_file",
+            "qualifiedName": "logger._ensure_file",
+            "clusterId": 4
+          }
+        },
+        {
+          "id": "FUNCTION::logger.py::log_attention:39",
+          "type": "FUNCTION",
+          "name": "logger.log_attention",
+          "file": "logger.py",
+          "start_line": 39,
+          "end_line": 64,
+          "metadata": {
+            "simpleName": "log_attention",
+            "qualifiedName": "logger.log_attention",
+            "clusterId": 5
+          }
+        },
+        {
+          "id": "FUNCTION::logger.py::log_student_state:69",
+          "type": "FUNCTION",
+          "name": "logger.log_student_state",
+          "file": "logger.py",
+          "start_line": 69,
+          "end_line": 80,
+          "metadata": {
+            "simpleName": "log_student_state",
+            "qualifiedName": "logger.log_student_state",
+            "clusterId": 6
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::self:13",
+          "type": "VARIABLE",
+          "name": "self",
+          "file": "logger.py",
+          "start_line": 13,
+          "end_line": 13,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::interval:13",
+          "type": "VARIABLE",
+          "name": "interval",
+          "file": "logger.py",
+          "start_line": 13,
+          "end_line": 13,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::time:14",
+          "type": "VARIABLE",
+          "name": "time",
+          "file": "logger.py",
+          "start_line": 14,
+          "end_line": 14,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::os:23",
+          "type": "VARIABLE",
+          "name": "os",
+          "file": "logger.py",
+          "start_line": 23,
+          "end_line": 23,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::open:26",
+          "type": "VARIABLE",
+          "name": "open",
+          "file": "logger.py",
+          "start_line": 26,
+          "end_line": 26,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::writer:27",
+          "type": "VARIABLE",
+          "name": "writer",
+          "file": "logger.py",
+          "start_line": 27,
+          "end_line": 27,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::csv:27",
+          "type": "VARIABLE",
+          "name": "csv",
+          "file": "logger.py",
+          "start_line": 27,
+          "end_line": 27,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::f:27",
+          "type": "VARIABLE",
+          "name": "f",
+          "file": "logger.py",
+          "start_line": 27,
+          "end_line": 27,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::current_time:41",
+          "type": "VARIABLE",
+          "name": "current_time",
+          "file": "logger.py",
+          "start_line": 41,
+          "end_line": 41,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::total:46",
+          "type": "VARIABLE",
+          "name": "total",
+          "file": "logger.py",
+          "start_line": 46,
+          "end_line": 46,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::data:46",
+          "type": "VARIABLE",
+          "name": "data",
+          "file": "logger.py",
+          "start_line": 46,
+          "end_line": 46,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::attentive:47",
+          "type": "VARIABLE",
+          "name": "attentive",
+          "file": "logger.py",
+          "start_line": 47,
+          "end_line": 47,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::distracted:48",
+          "type": "VARIABLE",
+          "name": "distracted",
+          "file": "logger.py",
+          "start_line": 48,
+          "end_line": 48,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::percentage:50",
+          "type": "VARIABLE",
+          "name": "percentage",
+          "file": "logger.py",
+          "start_line": 50,
+          "end_line": 50,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::datetime:56",
+          "type": "VARIABLE",
+          "name": "datetime",
+          "file": "logger.py",
+          "start_line": 56,
+          "end_line": 56,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::round:57",
+          "type": "VARIABLE",
+          "name": "round",
+          "file": "logger.py",
+          "start_line": 57,
+          "end_line": 57,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::path:71",
+          "type": "VARIABLE",
+          "name": "path",
+          "file": "logger.py",
+          "start_line": 71,
+          "end_line": 71,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::student_id:78",
+          "type": "VARIABLE",
+          "name": "student_id",
+          "file": "logger.py",
+          "start_line": 78,
+          "end_line": 78,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::logger.py::state:79",
+          "type": "VARIABLE",
+          "name": "state",
+          "file": "logger.py",
+          "start_line": 79,
+          "end_line": 79,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "FILE::main.py",
+          "type": "FILE",
+          "name": "main.py",
+          "file": "main.py"
+        },
+        {
+          "id": "FILE::person_detection.py",
+          "type": "FILE",
+          "name": "person_detection.py",
+          "file": "person_detection.py"
+        },
+        {
+          "id": "FILE::phase2_tracking.py",
+          "type": "FILE",
+          "name": "phase2_tracking.py",
+          "file": "phase2_tracking.py"
+        },
+        {
+          "id": "FILE::phase4_advanced_attention.py",
+          "type": "FILE",
+          "name": "phase4_advanced_attention.py",
+          "file": "phase4_advanced_attention.py"
+        },
+        {
+          "id": "FILE::privacy.py",
+          "type": "FILE",
+          "name": "privacy.py",
+          "file": "privacy.py"
+        },
+        {
+          "id": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "FUNCTION",
+          "name": "privacy.blur_faces",
+          "file": "privacy.py",
+          "start_line": 28,
+          "end_line": 98,
+          "metadata": {
+            "simpleName": "blur_faces",
+            "qualifiedName": "privacy.blur_faces",
+            "clusterId": 7
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::np:28",
+          "type": "VARIABLE",
+          "name": "np",
+          "file": "privacy.py",
+          "start_line": 28,
+          "end_line": 28,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::list:28",
+          "type": "VARIABLE",
+          "name": "list",
+          "file": "privacy.py",
+          "start_line": 28,
+          "end_line": 28,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::frame:40",
+          "type": "VARIABLE",
+          "name": "frame",
+          "file": "privacy.py",
+          "start_line": 40,
+          "end_line": 40,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::detections:45",
+          "type": "VARIABLE",
+          "name": "detections",
+          "file": "privacy.py",
+          "start_line": 45,
+          "end_line": 45,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::x1:46",
+          "type": "VARIABLE",
+          "name": "x1",
+          "file": "privacy.py",
+          "start_line": 46,
+          "end_line": 46,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::max:46",
+          "type": "VARIABLE",
+          "name": "max",
+          "file": "privacy.py",
+          "start_line": 46,
+          "end_line": 46,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::min:46",
+          "type": "VARIABLE",
+          "name": "min",
+          "file": "privacy.py",
+          "start_line": 46,
+          "end_line": 46,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::int:46",
+          "type": "VARIABLE",
+          "name": "int",
+          "file": "privacy.py",
+          "start_line": 46,
+          "end_line": 46,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::det:46",
+          "type": "VARIABLE",
+          "name": "det",
+          "file": "privacy.py",
+          "start_line": 46,
+          "end_line": 46,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::w_f:46",
+          "type": "VARIABLE",
+          "name": "w_f",
+          "file": "privacy.py",
+          "start_line": 46,
+          "end_line": 46,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::y1:47",
+          "type": "VARIABLE",
+          "name": "y1",
+          "file": "privacy.py",
+          "start_line": 47,
+          "end_line": 47,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::h_f:47",
+          "type": "VARIABLE",
+          "name": "h_f",
+          "file": "privacy.py",
+          "start_line": 47,
+          "end_line": 47,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::x2:48",
+          "type": "VARIABLE",
+          "name": "x2",
+          "file": "privacy.py",
+          "start_line": 48,
+          "end_line": 48,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::y2:49",
+          "type": "VARIABLE",
+          "name": "y2",
+          "file": "privacy.py",
+          "start_line": 49,
+          "end_line": 49,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::person_crop:54",
+          "type": "VARIABLE",
+          "name": "person_crop",
+          "file": "privacy.py",
+          "start_line": 54,
+          "end_line": 54,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::face_found:58",
+          "type": "VARIABLE",
+          "name": "face_found",
+          "file": "privacy.py",
+          "start_line": 58,
+          "end_line": 58,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::_USE_MP:60",
+          "type": "VARIABLE",
+          "name": "_USE_MP",
+          "file": "privacy.py",
+          "start_line": 60,
+          "end_line": 60,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::rgb:61",
+          "type": "VARIABLE",
+          "name": "rgb",
+          "file": "privacy.py",
+          "start_line": 61,
+          "end_line": 61,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::cv2:61",
+          "type": "VARIABLE",
+          "name": "cv2",
+          "file": "privacy.py",
+          "start_line": 61,
+          "end_line": 61,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::results:62",
+          "type": "VARIABLE",
+          "name": "results",
+          "file": "privacy.py",
+          "start_line": 62,
+          "end_line": 62,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::_face_det:62",
+          "type": "VARIABLE",
+          "name": "_face_det",
+          "file": "privacy.py",
+          "start_line": 62,
+          "end_line": 62,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::bb:66",
+          "type": "VARIABLE",
+          "name": "bb",
+          "file": "privacy.py",
+          "start_line": 66,
+          "end_line": 66,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::face:66",
+          "type": "VARIABLE",
+          "name": "face",
+          "file": "privacy.py",
+          "start_line": 66,
+          "end_line": 66,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::fx1:70",
+          "type": "VARIABLE",
+          "name": "fx1",
+          "file": "privacy.py",
+          "start_line": 70,
+          "end_line": 70,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::cw:70",
+          "type": "VARIABLE",
+          "name": "cw",
+          "file": "privacy.py",
+          "start_line": 70,
+          "end_line": 70,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::BLUR_PAD:70",
+          "type": "VARIABLE",
+          "name": "BLUR_PAD",
+          "file": "privacy.py",
+          "start_line": 70,
+          "end_line": 70,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::fy1:71",
+          "type": "VARIABLE",
+          "name": "fy1",
+          "file": "privacy.py",
+          "start_line": 71,
+          "end_line": 71,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::ch:71",
+          "type": "VARIABLE",
+          "name": "ch",
+          "file": "privacy.py",
+          "start_line": 71,
+          "end_line": 71,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::fx2:72",
+          "type": "VARIABLE",
+          "name": "fx2",
+          "file": "privacy.py",
+          "start_line": 72,
+          "end_line": 72,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::fy2:73",
+          "type": "VARIABLE",
+          "name": "fy2",
+          "file": "privacy.py",
+          "start_line": 73,
+          "end_line": 73,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::roi:78",
+          "type": "VARIABLE",
+          "name": "roi",
+          "file": "privacy.py",
+          "start_line": 78,
+          "end_line": 78,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::BLUR_KERNEL:80",
+          "type": "VARIABLE",
+          "name": "BLUR_KERNEL",
+          "file": "privacy.py",
+          "start_line": 80,
+          "end_line": 80,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::privacy.py::BLUR_SIGMA:80",
+          "type": "VARIABLE",
+          "name": "BLUR_SIGMA",
+          "file": "privacy.py",
+          "start_line": 80,
+          "end_line": 80,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "FILE::utils.py",
+          "type": "FILE",
+          "name": "utils.py",
+          "file": "utils.py"
+        },
+        {
+          "id": "CLASS::utils.py::FPSCounter:15",
+          "type": "CLASS",
+          "name": "FPSCounter",
+          "file": "utils.py",
+          "start_line": 15,
+          "end_line": 23
+        },
+        {
+          "id": "FUNCTION::utils.py::ensure_dirs:10",
+          "type": "FUNCTION",
+          "name": "utils.ensure_dirs",
+          "file": "utils.py",
+          "start_line": 10,
+          "end_line": 12,
+          "metadata": {
+            "simpleName": "ensure_dirs",
+            "qualifiedName": "utils.ensure_dirs",
+            "clusterId": 8
+          }
+        },
+        {
+          "id": "FUNCTION::utils.py::__init__:16",
+          "type": "FUNCTION",
+          "name": "utils.__init__",
+          "file": "utils.py",
+          "start_line": 16,
+          "end_line": 17,
+          "metadata": {
+            "simpleName": "__init__",
+            "qualifiedName": "utils.__init__",
+            "clusterId": 9
+          }
+        },
+        {
+          "id": "FUNCTION::utils.py::tick:19",
+          "type": "FUNCTION",
+          "name": "utils.tick",
+          "file": "utils.py",
+          "start_line": 19,
+          "end_line": 23,
+          "metadata": {
+            "simpleName": "tick",
+            "qualifiedName": "utils.tick",
+            "clusterId": 10
+          }
+        },
+        {
+          "id": "FUNCTION::utils.py::draw_hud:26",
+          "type": "FUNCTION",
+          "name": "utils.draw_hud",
+          "file": "utils.py",
+          "start_line": 26,
+          "end_line": 42,
+          "metadata": {
+            "simpleName": "draw_hud",
+            "qualifiedName": "utils.draw_hud",
+            "clusterId": 11
+          }
+        },
+        {
+          "id": "FUNCTION::utils.py::draw_person_box:45",
+          "type": "FUNCTION",
+          "name": "utils.draw_person_box",
+          "file": "utils.py",
+          "start_line": 45,
+          "end_line": 52,
+          "metadata": {
+            "simpleName": "draw_person_box",
+            "qualifiedName": "utils.draw_person_box",
+            "clusterId": 12
+          }
+        },
+        {
+          "id": "FUNCTION::utils.py::print_section:55",
+          "type": "FUNCTION",
+          "name": "utils.print_section",
+          "file": "utils.py",
+          "start_line": 55,
+          "end_line": 58,
+          "metadata": {
+            "simpleName": "print_section",
+            "qualifiedName": "utils.print_section",
+            "clusterId": 13
+          }
+        },
+        {
+          "id": "FUNCTION::utils.py::print_live_status:61",
+          "type": "FUNCTION",
+          "name": "utils.print_live_status",
+          "file": "utils.py",
+          "start_line": 61,
+          "end_line": 65,
+          "metadata": {
+            "simpleName": "print_live_status",
+            "qualifiedName": "utils.print_live_status",
+            "clusterId": 14
+          }
+        },
+        {
+          "id": "FUNCTION::utils.py::timestamp_str:68",
+          "type": "FUNCTION",
+          "name": "utils.timestamp_str",
+          "file": "utils.py",
+          "start_line": 68,
+          "end_line": 69,
+          "metadata": {
+            "simpleName": "timestamp_str",
+            "qualifiedName": "utils.timestamp_str",
+            "clusterId": 15
+          }
+        },
+        {
+          "id": "FUNCTION::utils.py::safe_crop:72",
+          "type": "FUNCTION",
+          "name": "utils.safe_crop",
+          "file": "utils.py",
+          "start_line": 72,
+          "end_line": 77,
+          "metadata": {
+            "simpleName": "safe_crop",
+            "qualifiedName": "utils.safe_crop",
+            "clusterId": 16
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::paths:11",
+          "type": "VARIABLE",
+          "name": "paths",
+          "file": "utils.py",
+          "start_line": 11,
+          "end_line": 11,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::os:12",
+          "type": "VARIABLE",
+          "name": "os",
+          "file": "utils.py",
+          "start_line": 12,
+          "end_line": 12,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::p:12",
+          "type": "VARIABLE",
+          "name": "p",
+          "file": "utils.py",
+          "start_line": 12,
+          "end_line": 12,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::self:17",
+          "type": "VARIABLE",
+          "name": "self",
+          "file": "utils.py",
+          "start_line": 17,
+          "end_line": 17,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::deque:17",
+          "type": "VARIABLE",
+          "name": "deque",
+          "file": "utils.py",
+          "start_line": 17,
+          "end_line": 17,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::window:17",
+          "type": "VARIABLE",
+          "name": "window",
+          "file": "utils.py",
+          "start_line": 17,
+          "end_line": 17,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::time:20",
+          "type": "VARIABLE",
+          "name": "time",
+          "file": "utils.py",
+          "start_line": 20,
+          "end_line": 20,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::len:21",
+          "type": "VARIABLE",
+          "name": "len",
+          "file": "utils.py",
+          "start_line": 21,
+          "end_line": 21,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::round:23",
+          "type": "VARIABLE",
+          "name": "round",
+          "file": "utils.py",
+          "start_line": 23,
+          "end_line": 23,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::frame:27",
+          "type": "VARIABLE",
+          "name": "frame",
+          "file": "utils.py",
+          "start_line": 27,
+          "end_line": 27,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::pct:29",
+          "type": "VARIABLE",
+          "name": "pct",
+          "file": "utils.py",
+          "start_line": 29,
+          "end_line": 29,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::total:29",
+          "type": "VARIABLE",
+          "name": "total",
+          "file": "utils.py",
+          "start_line": 29,
+          "end_line": 29,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::attentive:29",
+          "type": "VARIABLE",
+          "name": "attentive",
+          "file": "utils.py",
+          "start_line": 29,
+          "end_line": 29,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::overlay:31",
+          "type": "VARIABLE",
+          "name": "overlay",
+          "file": "utils.py",
+          "start_line": 31,
+          "end_line": 31,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::cv2:32",
+          "type": "VARIABLE",
+          "name": "cv2",
+          "file": "utils.py",
+          "start_line": 32,
+          "end_line": 32,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::w:32",
+          "type": "VARIABLE",
+          "name": "w",
+          "file": "utils.py",
+          "start_line": 32,
+          "end_line": 32,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::colour:34",
+          "type": "VARIABLE",
+          "name": "colour",
+          "file": "utils.py",
+          "start_line": 34,
+          "end_line": 34,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::fps:37",
+          "type": "VARIABLE",
+          "name": "fps",
+          "file": "utils.py",
+          "start_line": 37,
+          "end_line": 37,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::privacy_on:39",
+          "type": "VARIABLE",
+          "name": "privacy_on",
+          "file": "utils.py",
+          "start_line": 39,
+          "end_line": 39,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::attention:46",
+          "type": "VARIABLE",
+          "name": "attention",
+          "file": "utils.py",
+          "start_line": 46,
+          "end_line": 46,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::x1:47",
+          "type": "VARIABLE",
+          "name": "x1",
+          "file": "utils.py",
+          "start_line": 47,
+          "end_line": 47,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::y1:47",
+          "type": "VARIABLE",
+          "name": "y1",
+          "file": "utils.py",
+          "start_line": 47,
+          "end_line": 47,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::x2:47",
+          "type": "VARIABLE",
+          "name": "x2",
+          "file": "utils.py",
+          "start_line": 47,
+          "end_line": 47,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::y2:47",
+          "type": "VARIABLE",
+          "name": "y2",
+          "file": "utils.py",
+          "start_line": 47,
+          "end_line": 47,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::bg_y:48",
+          "type": "VARIABLE",
+          "name": "bg_y",
+          "file": "utils.py",
+          "start_line": 48,
+          "end_line": 48,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::max:48",
+          "type": "VARIABLE",
+          "name": "max",
+          "file": "utils.py",
+          "start_line": 48,
+          "end_line": 48,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::track_id:50",
+          "type": "VARIABLE",
+          "name": "track_id",
+          "file": "utils.py",
+          "start_line": 50,
+          "end_line": 50,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::print:56",
+          "type": "VARIABLE",
+          "name": "print",
+          "file": "utils.py",
+          "start_line": 56,
+          "end_line": 56,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::width:56",
+          "type": "VARIABLE",
+          "name": "width",
+          "file": "utils.py",
+          "start_line": 56,
+          "end_line": 56,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::title:57",
+          "type": "VARIABLE",
+          "name": "title",
+          "file": "utils.py",
+          "start_line": 57,
+          "end_line": 57,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::bar:63",
+          "type": "VARIABLE",
+          "name": "bar",
+          "file": "utils.py",
+          "start_line": 63,
+          "end_line": 63,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::int:63",
+          "type": "VARIABLE",
+          "name": "int",
+          "file": "utils.py",
+          "start_line": 63,
+          "end_line": 63,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::datetime:69",
+          "type": "VARIABLE",
+          "name": "datetime",
+          "file": "utils.py",
+          "start_line": 69,
+          "end_line": 69,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::pad:74",
+          "type": "VARIABLE",
+          "name": "pad",
+          "file": "utils.py",
+          "start_line": 74,
+          "end_line": 74,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::min:75",
+          "type": "VARIABLE",
+          "name": "min",
+          "file": "utils.py",
+          "start_line": 75,
+          "end_line": 75,
+          "metadata": {
+            "variable": true
+          }
+        },
+        {
+          "id": "VARIABLE::utils.py::h:75",
+          "type": "VARIABLE",
+          "name": "h",
+          "file": "utils.py",
+          "start_line": 75,
+          "end_line": 75,
+          "metadata": {
+            "variable": true
+          }
+        }
+      ],
+      "edges": [
+        {
+          "source": "FILE::analytics.py",
+          "target": "FUNCTION::analytics.py::_read_log:23",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::analytics.py",
+          "target": "FUNCTION::analytics.py::_read_student_log:38",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::analytics.py",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::analytics.py",
+          "target": "FUNCTION::analytics.py::compute_student_scores:64",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::analytics.py",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::analytics.py",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::analytics.py",
+          "target": "FUNCTION::analytics.py::run_full_analytics:134",
+          "type": "DEFINES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::LOG_PATH:23",
+          "target": "FUNCTION::analytics.py::_read_log:23",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::LOG_PATH:23",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::LOG_PATH:23",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::os:24",
+          "target": "FUNCTION::analytics.py::_read_log:23",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::os:24",
+          "target": "FUNCTION::analytics.py::_read_student_log:38",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::os:24",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::os:24",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::path:24",
+          "target": "FUNCTION::analytics.py::_read_log:23",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::path:24",
+          "target": "FUNCTION::analytics.py::_read_student_log:38",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::path:24",
+          "target": "FUNCTION::analytics.py::compute_student_scores:64",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::rows:25",
+          "target": "FUNCTION::analytics.py::_read_log:23",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::rows:25",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::rows:25",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::open:26",
+          "target": "FUNCTION::analytics.py::_read_log:23",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::open:26",
+          "target": "FUNCTION::analytics.py::_read_student_log:38",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::open:26",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::csv:27",
+          "target": "FUNCTION::analytics.py::_read_log:23",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::csv:27",
+          "target": "FUNCTION::analytics.py::_read_student_log:38",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::f:27",
+          "target": "FUNCTION::analytics.py::_read_log:23",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::f:27",
+          "target": "FUNCTION::analytics.py::_read_student_log:38",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::f:27",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::r:29",
+          "target": "FUNCTION::analytics.py::_read_log:23",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::r:29",
+          "target": "FUNCTION::analytics.py::_read_student_log:38",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::r:29",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::r:29",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::float:29",
+          "target": "FUNCTION::analytics.py::_read_log:23",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::int:30",
+          "target": "FUNCTION::analytics.py::_read_log:23",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::STUDENT_LOG_PATH:38",
+          "target": "FUNCTION::analytics.py::_read_student_log:38",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::STUDENT_LOG_PATH:38",
+          "target": "FUNCTION::analytics.py::compute_student_scores:64",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::hist:40",
+          "target": "FUNCTION::analytics.py::_read_student_log:38",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::hist:40",
+          "target": "FUNCTION::analytics.py::compute_student_scores:64",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::_read_log:48",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::_read_log:48",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::log_path:48",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::log_path:48",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::pcts:50",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::pcts:50",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::avg:51",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::avg:51",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::round:51",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::round:51",
+          "target": "FUNCTION::analytics.py::compute_student_scores:64",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::sum:51",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::sum:51",
+          "target": "FUNCTION::analytics.py::compute_student_scores:64",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::sum:51",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::len:51",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::len:51",
+          "target": "FUNCTION::analytics.py::compute_student_scores:64",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::len:51",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::max_att:52",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::max:52",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::max:52",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::min_att:52",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::min:52",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::min:52",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::max_total:53",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::drops:54",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::i:54",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::i:54",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::range:54",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::range:54",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::max_drop:55",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::mean:56",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::stdev:57",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::math:57",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::p:57",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::stability:58",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::_read_student_log:65",
+          "target": "FUNCTION::analytics.py::compute_student_scores:64",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::tid:66",
+          "target": "FUNCTION::analytics.py::compute_student_scores:64",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::tid:66",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::states:66",
+          "target": "FUNCTION::analytics.py::compute_student_scores:64",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::s:66",
+          "target": "FUNCTION::analytics.py::compute_student_scores:64",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::GRAPH_PATH:70",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::MPL:71",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::print:73",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::print:73",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::print:73",
+          "target": "FUNCTION::analytics.py::run_full_analytics:134",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::graph_path:74",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::timestamps:75",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::times:77",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::datetime:77",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::datetime:77",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::t:77",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::list:78",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::max_pct:79",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::min_pct:79",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::max_i:80",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::min_i:80",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::plt:81",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::fig:82",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::ax:82",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::isinstance:99",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::mdates:100",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::SUMMARY_PATH:109",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::summary_path:110",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::sorted_s:111",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::sorted:111",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::student_scores:111",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::student_scores:111",
+          "target": "FUNCTION::analytics.py::run_full_analytics:134",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::x:111",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::top5:112",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::bottom5:112",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::lines:113",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::stats:116",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::stats:116",
+          "target": "FUNCTION::analytics.py::run_full_analytics:134",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::enumerate:124",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::sc:124",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::content:128",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::compute_statistics:136",
+          "target": "FUNCTION::analytics.py::run_full_analytics:134",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::compute_student_scores:136",
+          "target": "FUNCTION::analytics.py::run_full_analytics:134",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::generate_graph:137",
+          "target": "FUNCTION::analytics.py::run_full_analytics:134",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::analytics.py::generate_summary:137",
+          "target": "FUNCTION::analytics.py::run_full_analytics:134",
+          "type": "USES"
+        },
+        {
+          "source": "FILE::logger.py",
+          "target": "CLASS::logger.py::AttentionLogger:10",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::logger.py",
+          "target": "FUNCTION::logger.py::__init__:12",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::logger.py",
+          "target": "FUNCTION::logger.py::_ensure_file:22",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::logger.py",
+          "target": "FUNCTION::logger.py::log_attention:39",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::logger.py",
+          "target": "FUNCTION::logger.py::log_student_state:69",
+          "type": "DEFINES"
+        },
+        {
+          "source": "VARIABLE::logger.py::self:13",
+          "target": "FUNCTION::logger.py::__init__:12",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::self:13",
+          "target": "FUNCTION::logger.py::_ensure_file:22",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::self:13",
+          "target": "FUNCTION::logger.py::log_attention:39",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::interval:13",
+          "target": "FUNCTION::logger.py::__init__:12",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::time:14",
+          "target": "FUNCTION::logger.py::__init__:12",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::time:14",
+          "target": "FUNCTION::logger.py::log_attention:39",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::os:23",
+          "target": "FUNCTION::logger.py::_ensure_file:22",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::os:23",
+          "target": "FUNCTION::logger.py::log_student_state:69",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::open:26",
+          "target": "FUNCTION::logger.py::_ensure_file:22",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::open:26",
+          "target": "FUNCTION::logger.py::log_attention:39",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::open:26",
+          "target": "FUNCTION::logger.py::log_student_state:69",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::writer:27",
+          "target": "FUNCTION::logger.py::_ensure_file:22",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::writer:27",
+          "target": "FUNCTION::logger.py::log_attention:39",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::writer:27",
+          "target": "FUNCTION::logger.py::log_student_state:69",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::csv:27",
+          "target": "FUNCTION::logger.py::_ensure_file:22",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::csv:27",
+          "target": "FUNCTION::logger.py::log_attention:39",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::csv:27",
+          "target": "FUNCTION::logger.py::log_student_state:69",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::f:27",
+          "target": "FUNCTION::logger.py::_ensure_file:22",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::f:27",
+          "target": "FUNCTION::logger.py::log_attention:39",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::f:27",
+          "target": "FUNCTION::logger.py::log_student_state:69",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::current_time:41",
+          "target": "FUNCTION::logger.py::log_attention:39",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::total:46",
+          "target": "FUNCTION::logger.py::log_attention:39",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::data:46",
+          "target": "FUNCTION::logger.py::log_attention:39",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::attentive:47",
+          "target": "FUNCTION::logger.py::log_attention:39",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::distracted:48",
+          "target": "FUNCTION::logger.py::log_attention:39",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::percentage:50",
+          "target": "FUNCTION::logger.py::log_attention:39",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::datetime:56",
+          "target": "FUNCTION::logger.py::log_attention:39",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::datetime:56",
+          "target": "FUNCTION::logger.py::log_student_state:69",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::round:57",
+          "target": "FUNCTION::logger.py::log_attention:39",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::path:71",
+          "target": "FUNCTION::logger.py::log_student_state:69",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::student_id:78",
+          "target": "FUNCTION::logger.py::log_student_state:69",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::logger.py::state:79",
+          "target": "FUNCTION::logger.py::log_student_state:69",
+          "type": "USES"
+        },
+        {
+          "source": "FILE::privacy.py",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "DEFINES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::np:28",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::list:28",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::frame:40",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::detections:45",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::x1:46",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::max:46",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::min:46",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::int:46",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::det:46",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::w_f:46",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::y1:47",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::h_f:47",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::x2:48",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::y2:49",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::person_crop:54",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::face_found:58",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::_USE_MP:60",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::rgb:61",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::cv2:61",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::results:62",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::_face_det:62",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::bb:66",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::face:66",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::fx1:70",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::cw:70",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::BLUR_PAD:70",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::fy1:71",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::ch:71",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::fx2:72",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::fy2:73",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::roi:78",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::BLUR_KERNEL:80",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::privacy.py::BLUR_SIGMA:80",
+          "target": "FUNCTION::privacy.py::blur_faces:28",
+          "type": "USES"
+        },
+        {
+          "source": "FILE::utils.py",
+          "target": "CLASS::utils.py::FPSCounter:15",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::utils.py",
+          "target": "FUNCTION::utils.py::ensure_dirs:10",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::utils.py",
+          "target": "FUNCTION::utils.py::__init__:16",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::utils.py",
+          "target": "FUNCTION::utils.py::tick:19",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::utils.py",
+          "target": "FUNCTION::utils.py::draw_hud:26",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::utils.py",
+          "target": "FUNCTION::utils.py::draw_person_box:45",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::utils.py",
+          "target": "FUNCTION::utils.py::print_section:55",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::utils.py",
+          "target": "FUNCTION::utils.py::print_live_status:61",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::utils.py",
+          "target": "FUNCTION::utils.py::timestamp_str:68",
+          "type": "DEFINES"
+        },
+        {
+          "source": "FILE::utils.py",
+          "target": "FUNCTION::utils.py::safe_crop:72",
+          "type": "DEFINES"
+        },
+        {
+          "source": "VARIABLE::utils.py::paths:11",
+          "target": "FUNCTION::utils.py::ensure_dirs:10",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::os:12",
+          "target": "FUNCTION::utils.py::ensure_dirs:10",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::p:12",
+          "target": "FUNCTION::utils.py::ensure_dirs:10",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::self:17",
+          "target": "FUNCTION::logger.py::__init__:12",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::self:17",
+          "target": "FUNCTION::utils.py::__init__:16",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::self:17",
+          "target": "FUNCTION::utils.py::tick:19",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::deque:17",
+          "target": "FUNCTION::logger.py::__init__:12",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::deque:17",
+          "target": "FUNCTION::utils.py::__init__:16",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::window:17",
+          "target": "FUNCTION::logger.py::__init__:12",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::window:17",
+          "target": "FUNCTION::utils.py::__init__:16",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::time:20",
+          "target": "FUNCTION::utils.py::tick:19",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::len:21",
+          "target": "FUNCTION::utils.py::tick:19",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::round:23",
+          "target": "FUNCTION::utils.py::draw_hud:26",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::round:23",
+          "target": "FUNCTION::utils.py::print_live_status:61",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::round:23",
+          "target": "FUNCTION::utils.py::tick:19",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::frame:27",
+          "target": "FUNCTION::utils.py::draw_hud:26",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::frame:27",
+          "target": "FUNCTION::utils.py::draw_person_box:45",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::frame:27",
+          "target": "FUNCTION::utils.py::safe_crop:72",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::pct:29",
+          "target": "FUNCTION::utils.py::draw_hud:26",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::pct:29",
+          "target": "FUNCTION::utils.py::print_live_status:61",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::total:29",
+          "target": "FUNCTION::utils.py::draw_hud:26",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::total:29",
+          "target": "FUNCTION::utils.py::print_live_status:61",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::attentive:29",
+          "target": "FUNCTION::utils.py::draw_hud:26",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::attentive:29",
+          "target": "FUNCTION::utils.py::print_live_status:61",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::overlay:31",
+          "target": "FUNCTION::utils.py::draw_hud:26",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::cv2:32",
+          "target": "FUNCTION::utils.py::draw_hud:26",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::cv2:32",
+          "target": "FUNCTION::utils.py::draw_person_box:45",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::w:32",
+          "target": "FUNCTION::utils.py::draw_hud:26",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::w:32",
+          "target": "FUNCTION::utils.py::safe_crop:72",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::colour:34",
+          "target": "FUNCTION::utils.py::draw_hud:26",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::colour:34",
+          "target": "FUNCTION::utils.py::draw_person_box:45",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::fps:37",
+          "target": "FUNCTION::utils.py::draw_hud:26",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::fps:37",
+          "target": "FUNCTION::utils.py::print_live_status:61",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::privacy_on:39",
+          "target": "FUNCTION::utils.py::draw_hud:26",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::attention:46",
+          "target": "FUNCTION::utils.py::draw_person_box:45",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::x1:47",
+          "target": "FUNCTION::utils.py::draw_person_box:45",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::x1:47",
+          "target": "FUNCTION::utils.py::safe_crop:72",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::y1:47",
+          "target": "FUNCTION::utils.py::draw_person_box:45",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::y1:47",
+          "target": "FUNCTION::utils.py::safe_crop:72",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::x2:47",
+          "target": "FUNCTION::utils.py::draw_person_box:45",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::x2:47",
+          "target": "FUNCTION::utils.py::safe_crop:72",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::y2:47",
+          "target": "FUNCTION::utils.py::draw_person_box:45",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::y2:47",
+          "target": "FUNCTION::utils.py::safe_crop:72",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::bg_y:48",
+          "target": "FUNCTION::utils.py::draw_person_box:45",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::max:48",
+          "target": "FUNCTION::utils.py::draw_person_box:45",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::max:48",
+          "target": "FUNCTION::utils.py::safe_crop:72",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::track_id:50",
+          "target": "FUNCTION::utils.py::draw_person_box:45",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::print:56",
+          "target": "FUNCTION::utils.py::print_live_status:61",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::print:56",
+          "target": "FUNCTION::utils.py::print_section:55",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::width:56",
+          "target": "FUNCTION::utils.py::print_section:55",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::title:57",
+          "target": "FUNCTION::utils.py::print_section:55",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::bar:63",
+          "target": "FUNCTION::utils.py::print_live_status:61",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::int:63",
+          "target": "FUNCTION::utils.py::print_live_status:61",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::datetime:69",
+          "target": "FUNCTION::utils.py::timestamp_str:68",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::pad:74",
+          "target": "FUNCTION::utils.py::safe_crop:72",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::min:75",
+          "target": "FUNCTION::utils.py::safe_crop:72",
+          "type": "USES"
+        },
+        {
+          "source": "VARIABLE::utils.py::h:75",
+          "target": "FUNCTION::utils.py::safe_crop:72",
+          "type": "USES"
+        },
+        {
+          "source": "FUNCTION::analytics.py::run_full_analytics:134",
+          "target": "FUNCTION::analytics.py::compute_statistics:47",
+          "type": "CALLS"
+        },
+        {
+          "source": "FUNCTION::analytics.py::run_full_analytics:134",
+          "target": "FUNCTION::analytics.py::compute_student_scores:64",
+          "type": "CALLS"
+        },
+        {
+          "source": "FUNCTION::analytics.py::run_full_analytics:134",
+          "target": "FUNCTION::analytics.py::generate_graph:70",
+          "type": "CALLS"
+        },
+        {
+          "source": "FUNCTION::analytics.py::run_full_analytics:134",
+          "target": "FUNCTION::analytics.py::generate_summary:109",
+          "type": "CALLS"
+        },
+        {
+          "source": "FUNCTION::logger.py::__init__:12",
+          "target": "FUNCTION::logger.py::_ensure_file:22",
+          "type": "CALLS"
+        }
+      ]
+    },
+    "debugLog": [
+      "git coupling scores: 0",
+      "AST extraction summary: files=9",
+      "functions parsed: 21",
+      "call edges created: 5",
+      "resolved calls: 5",
+      "calls ignored: 125",
+      "dependency edges: 0",
+      "git coupling edges: 0"
+    ]
+  }
+}
