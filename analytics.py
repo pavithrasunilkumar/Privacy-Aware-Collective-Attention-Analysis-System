@@ -126,7 +126,7 @@ def generate_summary(stats, student_scores, summary_path=SUMMARY_PATH):
     for i,(tid,sc) in enumerate(bottom5,1): lines.append(f"  #{i}  Student ID {tid:>4}  →  {sc}%")
     lines+=["","="*52,""]
     content="\n".join(lines)
-    with open(summary_path,"w") as f: f.write(content)
+    with open(summary_path,"w", encoding="utf-8") as f: f.write(content)
     print(f"[analytics] Summary saved → {summary_path}")
     return content
 
