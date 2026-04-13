@@ -57,7 +57,7 @@ Python 3.10 or higher recommended.
 ### Install dependencies
 
 ```bash
-pip install ultralytics mediapipe opencv-python matplotlib flask flask-socketio requests
+pip install ultralytics mediapipe opencv-python matplotlib flask flask-socketio requests torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 ```
 
 > If you are using a virtual environment (recommended):
@@ -65,8 +65,17 @@ pip install ultralytics mediapipe opencv-python matplotlib flask flask-socketio 
 > python -m venv venv
 > venv\Scripts\activate        # Windows
 > source venv/bin/activate     # Mac / Linux
-> pip install ultralytics mediapipe opencv-python matplotlib flask flask-socketio requests
+> pip install ultralytics mediapipe opencv-python matplotlib flask flask-socketio requests torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 > ```
+
+### Upgrade MediaPipe (if needed for Python 3.12+)
+
+If you encounter `MediaPipe unavailable` errors with Python 3.12 or higher:
+
+```bash
+pip uninstall mediapipe -y
+pip install mediapipe --upgrade --no-cache-dir
+```
 
 ---
 
