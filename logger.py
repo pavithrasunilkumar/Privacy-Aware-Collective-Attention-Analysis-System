@@ -33,6 +33,29 @@ class AttentionLogger:
                     "distracted_count"
                 ])
 
+    def reset_session_logs(self, student_log_path="data/student_log.csv"):
+        """Start a fresh session by clearing the per-run CSV logs."""
+        self._ensure_file()
+
+        with open(self.log_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "timestamp",
+                "attention_percentage",
+                "total_students",
+                "attentive_count",
+                "distracted_count"
+            ])
+
+        os.makedirs(os.path.dirname(student_log_path), exist_ok=True)
+        with open(student_log_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "timestamp",
+                "track_id",
+                "state"
+            ])
+
     # -------------------------------
     # LOG CLASS ATTENTION
     # -------------------------------

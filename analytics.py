@@ -3,14 +3,17 @@
 # ============================================================
 
 import os, csv, math
+import contextlib
+import io
 from datetime import datetime
 
 try:
-    import matplotlib; matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import matplotlib.dates as mdates
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        import matplotlib; matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
     MPL = True
-except ImportError:
+except Exception:
     MPL = False
     print("[analytics] matplotlib not installed — graph skipped.")
 

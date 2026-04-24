@@ -13,8 +13,6 @@ import webbrowser
 from datetime import datetime
 from flask import Flask, render_template_string, jsonify
 from flask_socketio import SocketIO
-from analytics import (compute_statistics, compute_student_scores,
-                        generate_graph, generate_summary)
 from utils import print_section
 
 LOG_PATH         = "data/attention_log.csv"
@@ -476,6 +474,9 @@ def start_web_dashboard():
 def run_final_dashboard():
     """Compute analytics, push summary to browser, print to console."""
     global _final_summary
+    from analytics import (compute_statistics, compute_student_scores,
+                           generate_graph, generate_summary)
+
     print_section("POST-SESSION ANALYTICS")
 
     stats          = compute_statistics(LOG_PATH)

@@ -23,3 +23,5 @@ Thumbs.db
 
 # Secrets
 .env
+# ArchitectIQ graph cache
+.architectiq/

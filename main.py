@@ -1,12 +1,11 @@
 import cv2
+import contextlib
+import io
 import sys
 from datetime import datetime
 
 # ── Project modules ───────────────────────────────────────────────────────────
 from logger    import AttentionLogger
-from dashboard import (start_web_dashboard, update_student,
-                        print_live_dashboard, run_final_dashboard)
-from privacy   import blur_faces
 from utils     import (FPSCounter, draw_person_box, draw_hud, ensure_dirs)
 
 # Instantiate logger (handles 2-second time-gating internally)
@@ -17,53 +16,114 @@ CAMERA_INDEX      = 0
 FRAME_WIDTH       = 1280
 FRAME_HEIGHT      = 720
 YOLO_MODEL        = "yolov8n.pt"
-YOLO_CONF         = 0.4
+YOLO_CONF         = 0.6
 YOLO_DEVICE       = "cuda"
-SMOOTHING_WINDOW  = 5
+SMOOTHING_WINDOW  = 11
 PRIVACY_ENABLED   = True
 WINDOW_TITLE      = "ClassWatch — Privacy-Aware Attention System"
 
-YAW_THRESHOLD   = 30
-PITCH_THRESHOLD = 25
+YAW_THRESHOLD   = 55
+PITCH_THRESHOLD = 50
 
 # ── YOLO + MediaPipe setup ───────────────────────────────────────────────────
 import numpy as np
-from ultralytics import YOLO
-import mediapipe as mp
 
-_model      = YOLO(YOLO_MODEL)
-_model.to(YOLO_DEVICE)
+_model      = None
+_face_det   = None
+_face_mesh  = None
+_face_models_checked = False
+_face_models_ready = False
+_tracking_checked = False
+_tracking_ready = False
+_dashboard_loaded = False
+_cuda_checked = False
 
-_mp_fd      = mp.solutions.face_detection
-_mp_fm      = mp.solutions.face_mesh
-_face_det   = _mp_fd.FaceDetection(model_selection=1, min_detection_confidence=0.3)
-_face_mesh  = _mp_fm.FaceMesh(refine_landmarks=True, max_num_faces=1)
+
+def _ensure_dashboard_api():
+    global _dashboard_loaded, start_web_dashboard, update_student
+    global print_live_dashboard, run_final_dashboard
+
+    if _dashboard_loaded:
+        return
+
+    from dashboard import (start_web_dashboard, update_student,
+                           print_live_dashboard, run_final_dashboard)
+
+    _dashboard_loaded = True
+
+
+def _ensure_vision_models():
+    global _model, _face_det, _face_mesh, YOLO_DEVICE, _cuda_checked
+    global _face_models_checked, _face_models_ready
+
+    if _model is None:
+        from ultralytics import YOLO
+        import torch
+
+        if not _cuda_checked:
+            if not torch.cuda.is_available():
+                raise RuntimeError(
+                    "CUDA is required but not available. Install a CUDA-enabled PyTorch build and run on the RTX 4060."
+                )
+            _cuda_checked = True
+
+        _model = YOLO(YOLO_MODEL)
+        _model.to(YOLO_DEVICE)
+
+    if _face_models_checked:
+        return
+
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            import mediapipe as mp
+
+        _mp_fd = mp.solutions.face_detection
+        _mp_fm = mp.solutions.face_mesh
+        _face_det = _mp_fd.FaceDetection(model_selection=1, min_detection_confidence=0.3)
+        _face_mesh = _mp_fm.FaceMesh(refine_landmarks=True, max_num_faces=1)
+        _face_models_ready = True
+    except Exception:
+        _face_det = None
+        _face_mesh = None
+        _face_models_ready = False
+        print("[main] MediaPipe unavailable — face attention will default to Distracted.")
+    finally:
+        _face_models_checked = True
 
 # Track IDs assigned by ByteTrack across frames
 _track_id_map = {}
 
 
 def detect_persons(frame):
-    results = _model.track(
-    frame, persist=True,
-    tracker="bytetrack.yaml",
-    conf=YOLO_CONF,
-    verbose=False
-)
+    _ensure_vision_models()
 
-    out = []
-    for r in results:
-        if r.boxes is None:
-            continue
-        for box in r.boxes:
-            if int(box.cls[0]) != 0:
+    global _tracking_checked, _tracking_ready
+
+    if _tracking_ready or not _tracking_checked:
+        results = _model.track(
+            frame, persist=True,
+            tracker="bytetrack.yaml",
+            conf=YOLO_CONF,
+            verbose=False,
+        )
+        _tracking_checked = True
+        _tracking_ready = True
+
+        out = []
+        for r in results:
+            if r.boxes is None:
                 continue
-            if box.id is None:
-                continue
-            tid = int(box.id[0])
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            out.append((x1, y1, x2, y2, tid))
-    return out
+            for box in r.boxes:
+                if int(box.cls[0]) != 0:
+                    continue
+                if box.id is None:
+                    continue
+                tid = int(box.id[0])
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                out.append((x1, y1, x2, y2, tid))
+        return out
+
+    raise RuntimeError("Unexpected tracker state: tracking should be initialized on first use.")
 
 
 def update_tracker(frame, detections):
@@ -71,6 +131,11 @@ def update_tracker(frame, detections):
 
 
 def get_attention_state(frame, box):
+    _ensure_vision_models()
+
+    if not _face_models_ready:
+        return "Distracted"
+
     x1, y1, x2, y2 = box
     pad = 15
     h_f, w_f = frame.shape[:2]
@@ -136,6 +201,7 @@ def _smooth(history: list, window: int) -> str:
 
 def main() -> None:
     ensure_dirs("data", "outputs")
+    _logger.reset_session_logs()
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
@@ -148,6 +214,9 @@ def main() -> None:
     fps_counter    = FPSCounter(window=30)
     session_start  = datetime.now().strftime("%H:%M:%S")
     student_history: dict = {}
+
+    _ensure_dashboard_api()
+    from privacy import blur_faces
 
     start_web_dashboard()
 
@@ -177,8 +246,8 @@ def main() -> None:
             update_student(tid, smoothed)
 
         if PRIVACY_ENABLED and tracked:
-            blur_dets = [{"x1":x1,"y1":y1,"x2":x2,"y2":y2}
-                         for (x1,y1,x2,y2,_) in tracked]
+            blur_dets = [{"x1":x1,"y1":y1,"x2":x2,"y2":y2,"track_id":tid}
+                         for (x1,y1,x2,y2,tid) in tracked]
             blur_faces(frame, blur_dets)
 
         for (x1, y1, x2, y2, tid) in tracked:

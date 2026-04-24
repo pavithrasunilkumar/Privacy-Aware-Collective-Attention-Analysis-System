@@ -4,6 +4,49 @@ An advanced computer vision-driven system for analyzing collective classroom att
 
 ---
 
+## Pipeline Architecture
+
+<p align="center">
+  <img src="architecture.svg" alt="ClassWatch Pipeline Architecture" width="100%"/>
+</p>
+
+The pipeline runs in a continuous loop per frame:
+
+```
+Webcam Input (640×480)
+    │
+    ▼
+YOLOv8n (GPU) ──────────────────────────► privacy.py
+    │                                       Gaussian blur on face ROI (in-memory)
+    ▼
+ByteTrack ──────────────────────────────► logger.py
+    │                                       Time-gated CSV write every 2 seconds
+    ▼
+MediaPipe Face Mesh                         data/attention_log.csv
+    │                                       data/student_log.csv
+    ▼
+Attention Logic  (|yaw| < 30°, |pitch| < 25°)
+    │
+    ▼
+Smoothing  (majority vote, W=5 frames) ──► utils.py
+    │                                       HUD overlay on OpenCV window
+    ▼
+dashboard.py  ─── SocketIO ──────────────► Browser (localhost:5000)
+                                            • Attention gauge
+                                            • Line chart (attention % over time)
+                                            • Donut chart (attentive vs distracted)
+                                            • Distraction event log with timestamps
+                                            • Per-student sparkline cards
+
+On press 'q':
+    ├──► analytics.py → outputs/attention_graph.png
+    │                   outputs/summary.txt
+    └──► dashboard.py → session_summary SocketIO event
+                        (peak time, low time, per-student averages)
+```
+
+---
+
 ## Features
 
 - **Real-time person detection** — YOLOv8n on GPU, handles up to `YOLO_MAX_DET` students simultaneously
@@ -33,6 +76,7 @@ project/
 ├── dashboard.py       ← Flask web server + SocketIO + HTML dashboard
 ├── privacy.py         ← Face detection + Gaussian blur (no storage)
 ├── utils.py           ← Shared helpers: FPS counter, HUD drawing, etc.
+├── architecture.svg   ← Pipeline architecture diagram
 │
 ├── data/
 │   ├── attention_log.csv     ← Class-level log (auto-created)
@@ -49,10 +93,10 @@ project/
 
 ### Hardware
 - Webcam (built-in or USB)
-- NVIDIA GPU recommended (CUDA). CPU fallback works but will be slower.
+- NVIDIA GPU required for the detection pipeline. This setup is intended to run on CUDA.
 
 ### Python
-Python 3.10 or higher recommended.
+Python 3.10 or 3.11 recommended. Python 3.13 is **not** supported — MediaPipe and PyTorch wheels are unavailable for 3.13.
 
 ### Install dependencies
 
@@ -119,13 +163,13 @@ All tunable parameters are at the top of `main.py`:
 ```python
 # ── Camera & display ──────────────────────────────────────
 CAMERA_INDEX     = 0        # 0 = default webcam, 1 = external USB cam
-FRAME_WIDTH      = 1280     # display resolution (detection runs at 640x480 internally)
+FRAME_WIDTH      = 1280     # display resolution (detection runs at 640×480 internally)
 FRAME_HEIGHT     = 720
 
 # ── YOLO detection ────────────────────────────────────────
 YOLO_MODEL       = "yolov8n.pt"   # yolov8n = fastest, yolov8m = more accurate
 YOLO_CONF        = 0.4            # detection confidence threshold (0.0–1.0)
-YOLO_DEVICE      = "cuda"         # "cuda" for GPU, "cpu" for CPU-only
+YOLO_DEVICE      = "cuda"         # required: CUDA-only mode
 YOLO_MAX_DET     = 10             # max students tracked at once — raise for larger classes
 
 # ── Attention smoothing ───────────────────────────────────
@@ -147,7 +191,7 @@ PITCH_THRESHOLD  = 25       # degrees up/down before marked Distracted
 | Too many false detections | Raise `YOLO_CONF` to `0.5` |
 | Attention flickers too much | Raise `SMOOTHING_WINDOW` to `10` |
 | Sideways face still attentive | Lower `YAW_THRESHOLD` to `20` |
-| No GPU available | Set `YOLO_DEVICE = "cpu"` |
+| No GPU available | Install a CUDA-enabled PyTorch build for your GPU |
 | External / USB camera | Set `CAMERA_INDEX = 1` |
 
 ---
@@ -181,35 +225,6 @@ After pressing `q`, check the `outputs/` folder:
 
 ---
 
-## Pipeline Architecture
-
-```
-Webcam
-  │
-  ▼
-YOLOv8n (GPU)          — detects all persons in frame
-  │
-  ▼
-ByteTrack              — assigns persistent IDs across frames
-  │
-  ▼
-MediaPipe Face Mesh    — estimates head yaw + pitch per person
-  │
-  ▼
-Attention Logic        — Attentive if yaw < 30° and pitch < 25°
-  │
-  ├──▶ privacy.py      — MediaPipe face detection → Gaussian blur
-  ├──▶ logger.py       — CSV write every 2 seconds
-  ├──▶ dashboard.py    — SocketIO push to browser every frame
-  └──▶ utils.py        — HUD overlay drawn on OpenCV window
-
-On 'q':
-  ├──▶ analytics.py    — compute stats, generate graph
-  └──▶ dashboard.py    — emit session_summary to browser
-```
-
----
-
 ## Common Errors
 
 **`ImportError: cannot import name X from dashboard`**
@@ -221,11 +236,24 @@ Another application is using the webcam. Close Teams, Zoom, or any other camera 
 **`bytetrack.yaml not found`**
 This file is bundled with `ultralytics`. Run `pip install --upgrade ultralytics` to ensure it is present.
 
+**`Torch not compiled with CUDA enabled`**
+The default `pip install torch` installs a CPU-only build. Install the CUDA build explicitly:
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+Or set `YOLO_DEVICE = "cpu"` in `main.py` to run on CPU (slower but functional).
+
+**`module 'mediapipe' has no attribute 'solutions'`**
+You are on Python 3.13 which MediaPipe does not support. Use Python 3.11:
+```bash
+py -3.11 -m venv venv
+```
+
 **Dashboard shows but no data arrives**
 The SocketIO connection may be blocked. Ensure nothing else is running on port 5000. You can change `WEB_PORT` at the top of `dashboard.py`.
 
 **Low FPS / laggy video**
-Switch to `YOLO_DEVICE = "cpu"` only if you have no GPU. Otherwise ensure your CUDA drivers are up to date. You can also try `YOLO_MODEL = "yolov8n.pt"` if using a heavier model.
+Ensure your CUDA drivers and CUDA-enabled PyTorch build are installed correctly. Keep `YOLO_MODEL = "yolov8n.pt"` for the fastest model.
 
 ---
 
