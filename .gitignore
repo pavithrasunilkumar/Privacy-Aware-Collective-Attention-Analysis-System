@@ -2,6 +2,10 @@
 __pycache__/
 *.pyc
 *.pyo
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
 
 # Virtual Environment
 venv/
@@ -25,3 +29,11 @@ Thumbs.db
 .env
 # ArchitectIQ graph cache
 .architectiq/
+
+# Environment
+.env
+
+# YOLO model weights (download separately)
+*.pt
+*.onnx
+

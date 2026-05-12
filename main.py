@@ -1,11 +1,23 @@
+"""
+main.py
+-------
+Full pipeline entry point.
+
+Runs:
+  Camera → YOLO Detection → ByteTrack → Attention → Privacy → Display
+  + Temporal Logging every LOG_INTERVAL seconds
+  + On 'q': Analytics → Graph → Summary
+"""
+
 import cv2
-import contextlib
-import io
 import sys
 from datetime import datetime
 
 # ── Project modules ───────────────────────────────────────────────────────────
 from logger    import AttentionLogger
+from dashboard import (start_web_dashboard, update_student,
+                        print_live_dashboard, run_final_dashboard, push_frame)
+from privacy   import blur_faces
 from utils     import (FPSCounter, draw_person_box, draw_hud, ensure_dirs)
 
 # Instantiate logger (handles 2-second time-gating internally)
@@ -27,115 +39,55 @@ PITCH_THRESHOLD = 50
 
 # ── YOLO + MediaPipe setup ───────────────────────────────────────────────────
 import numpy as np
+from ultralytics import YOLO
+import mediapipe as mp
 
-_model      = None
-_face_det   = None
-_face_mesh  = None
-_face_models_checked = False
-_face_models_ready = False
-_tracking_checked = False
-_tracking_ready = False
-_dashboard_loaded = False
-_cuda_checked = False
+_model      = YOLO(YOLO_MODEL)
+_model.to(YOLO_DEVICE)
 
-
-def _ensure_dashboard_api():
-    global _dashboard_loaded, start_web_dashboard, update_student
-    global print_live_dashboard, run_final_dashboard
-
-    if _dashboard_loaded:
-        return
-
-    from dashboard import (start_web_dashboard, update_student,
-                           print_live_dashboard, run_final_dashboard)
-
-    _dashboard_loaded = True
-
-
-def _ensure_vision_models():
-    global _model, _face_det, _face_mesh, YOLO_DEVICE, _cuda_checked
-    global _face_models_checked, _face_models_ready
-
-    if _model is None:
-        from ultralytics import YOLO
-        import torch
-
-        if not _cuda_checked:
-            if not torch.cuda.is_available():
-                raise RuntimeError(
-                    "CUDA is required but not available. Install a CUDA-enabled PyTorch build and run on the RTX 4060."
-                )
-            _cuda_checked = True
-
-        _model = YOLO(YOLO_MODEL)
-        _model.to(YOLO_DEVICE)
-
-    if _face_models_checked:
-        return
-
-    try:
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            import mediapipe as mp
-
-        _mp_fd = mp.solutions.face_detection
-        _mp_fm = mp.solutions.face_mesh
-        _face_det = _mp_fd.FaceDetection(model_selection=1, min_detection_confidence=0.3)
-        _face_mesh = _mp_fm.FaceMesh(refine_landmarks=True, max_num_faces=1)
-        _face_models_ready = True
-    except Exception:
-        _face_det = None
-        _face_mesh = None
-        _face_models_ready = False
-        print("[main] MediaPipe unavailable — face attention will default to Distracted.")
-    finally:
-        _face_models_checked = True
+_mp_fd      = mp.solutions.face_detection
+_mp_fm      = mp.solutions.face_mesh
+_face_det   = _mp_fd.FaceDetection(model_selection=1, min_detection_confidence=0.3)
+_face_mesh  = _mp_fm.FaceMesh(refine_landmarks=True, max_num_faces=1)
 
 # Track IDs assigned by ByteTrack across frames
-_track_id_map = {}
+_track_id_map = {}   # internal YOLO track-id → stable int
 
 
 def detect_persons(frame):
-    _ensure_vision_models()
-
-    global _tracking_checked, _tracking_ready
-
-    if _tracking_ready or not _tracking_checked:
-        results = _model.track(
-            frame, persist=True,
-            tracker="bytetrack.yaml",
-            conf=YOLO_CONF,
-            verbose=False,
-        )
-        _tracking_checked = True
-        _tracking_ready = True
-
-        out = []
-        for r in results:
-            if r.boxes is None:
+    """Run YOLO + ByteTrack. Returns [(x1,y1,x2,y2,track_id), ...]."""
+    results = _model.track(
+        frame, persist=True,
+        tracker="bytetrack.yaml",
+        conf=YOLO_CONF,
+        verbose=False
+    )
+    out = []
+    for r in results:
+        if r.boxes is None:
+            continue
+        for box in r.boxes:
+            if int(box.cls[0]) != 0:   # person class only
                 continue
-            for box in r.boxes:
-                if int(box.cls[0]) != 0:
-                    continue
-                if box.id is None:
-                    continue
-                tid = int(box.id[0])
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                out.append((x1, y1, x2, y2, tid))
-        return out
-
-    raise RuntimeError("Unexpected tracker state: tracking should be initialized on first use.")
+            if box.id is None:
+                continue
+            tid = int(box.id[0])
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            out.append((x1, y1, x2, y2, tid))
+    return out
 
 
 def update_tracker(frame, detections):
-    return detections
+    """Tracker already handled inside detect_persons via ByteTrack."""
+    return detections   # pass-through
 
 
 def get_attention_state(frame, box):
-    _ensure_vision_models()
-
-    if not _face_models_ready:
-        return "Distracted"
-
+    """
+    Head-pose estimation via MediaPipe Face Mesh.
+    Returns "Attentive" or "Distracted".
+    Thresholds: YAW_THRESHOLD, PITCH_THRESHOLD (defined in Config).
+    """
     x1, y1, x2, y2 = box
     pad = 15
     h_f, w_f = frame.shape[:2]
@@ -148,7 +100,7 @@ def get_attention_state(frame, box):
     rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
     fd  = _face_det.process(rgb)
     if not fd.detections:
-        return "Distracted"
+        return "Distracted"   # no face visible = distracted
 
     det = fd.detections[0]
     bb  = det.location_data.relative_bounding_box
@@ -194,14 +146,18 @@ def get_attention_state(frame, box):
     return "Distracted"
 
 
+# ── Smoothing helper ──────────────────────────────────────────────────────────
 def _smooth(history: list, window: int) -> str:
     recent = history[-window:]
     return max(set(recent), key=recent.count)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Main loop
+# ─────────────────────────────────────────────────────────────────────────────
+
 def main() -> None:
     ensure_dirs("data", "outputs")
-    _logger.reset_session_logs()
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
@@ -213,11 +169,9 @@ def main() -> None:
 
     fps_counter    = FPSCounter(window=30)
     session_start  = datetime.now().strftime("%H:%M:%S")
-    student_history: dict = {}
+    student_history: dict = {}   # { track_id: [state, ...] }
 
-    _ensure_dashboard_api()
-    from privacy import blur_faces
-
+    # Start web dashboard in background thread (opens browser automatically)
     start_web_dashboard()
 
     print("\n  ┌─────────────────────────────────────────┐")
@@ -234,48 +188,64 @@ def main() -> None:
 
         frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
 
-        detections = detect_persons(frame)
-        tracked = update_tracker(frame, detections)
+        # ── 1. Detect persons ─────────────────────────────
+        detections = detect_persons(frame)          # [(x1,y1,x2,y2,conf), ...]
 
+        # ── 2. Track ──────────────────────────────────────
+        tracked = update_tracker(frame, detections) # [(x1,y1,x2,y2,id), ...]
+
+        # ── 3. Attention + smoothing ──────────────────────
         current_states = {}
         for (x1, y1, x2, y2, tid) in tracked:
             state = get_attention_state(frame, (x1, y1, x2, y2))
             student_history.setdefault(tid, []).append(state)
             smoothed = _smooth(student_history[tid], SMOOTHING_WINDOW)
             current_states[tid] = smoothed
-            update_student(tid, smoothed)
+            update_student(tid, smoothed)           # push to web dashboard
 
+        # ── 4. Privacy: blur faces ────────────────────────
         if PRIVACY_ENABLED and tracked:
-            blur_dets = [{"x1":x1,"y1":y1,"x2":x2,"y2":y2,"track_id":tid}
-                         for (x1,y1,x2,y2,tid) in tracked]
+            blur_dets = [{"x1":x1,"y1":y1,"x2":x2,"y2":y2}
+                         for (x1,y1,x2,y2,_) in tracked]
             blur_faces(frame, blur_dets)
 
+        # ── 5. Draw bounding boxes + labels ──────────────
         for (x1, y1, x2, y2, tid) in tracked:
             draw_person_box(frame, x1, y1, x2, y2, tid, current_states[tid])
 
+        # ── 6. Compute counts ────────────────────────────
         attentive  = sum(1 for s in current_states.values() if s == "Attentive")
         total      = len(current_states)
         distracted = total - attentive
 
+        # ── 7. Log (time-gated inside logger.py) ─────────
         _logger.log_attention({
             "attentive_count": attentive,
             "total_students":  total,
         })
 
+        # ── 8. HUD overlay ───────────────────────────────
         fps = fps_counter.tick()
         draw_hud(frame, attentive, total, fps, PRIVACY_ENABLED)
 
+        # ── 9. Push live data to web dashboard ───────────
         avg_pct = round(attentive / total * 100, 1) if total else 0.0
         print_live_dashboard(attentive, total, avg_pct, session_start, fps)
 
-        cv2.imshow(WINDOW_TITLE, frame)
+        # ── 10. Display ──────────────────────────────────
+        # Stream processed frame to browser instead of opening OpenCV window
+        push_frame(frame)
+
+        # Still check keyboard q via waitKey with a short delay (no window shown)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
+    # ── Cleanup ───────────────────────────────────────────
     cap.release()
     cv2.destroyAllWindows()
     print("\n\n  Stopping capture…\n")
 
+    # ── Post-session analytics + summary ──────────────────
     run_final_dashboard()
 
 

@@ -42,6 +42,9 @@
         "exports": [
           "index",
           "summary_api",
+          "toggle_camera",
+          "video_feed",
+          "push_frame",
           "print_live_dashboard",
           "update_student",
           "start_web_dashboard",
@@ -51,6 +54,10 @@
         "functions": [
           "index",
           "summary_api",
+          "toggle_camera",
+          "video_feed",
+          "generate",
+          "push_frame",
           "print_live_dashboard",
           "update_student",
           "start_web_dashboard",
@@ -60,7 +67,7 @@
         "isEntry": true,
         "path": "dashboard.py",
         "external": false,
-        "contentPreview": "# ============================================================\r\n# dashboard.py — Web Dashboard (Flask + SocketIO)\r\n# Changes vs previous version:\r\n#   • Removed top5/bot5 student lists\r\n#   • Summary shows per-student average attentiveness table\r\n#   • Summary shows exact time of peak and lowest attention\r\n#   • /summary route so browser always shows final summary\r\n#     even if the tab was opened after 'q' was pressed\r\n# ============================================================\r\n\r\nimport threading\r\nimport webbrowser\r\nfrom datetime import datetime\r\nfrom flask import Flask, render_template_string, jsonify\r\nfrom flask_socketio import SocketIO\r\nfrom utils import print_section\r\n\r\nLOG_PATH         = \"data/attention_log.csv\"\r\nSTUDENT_LOG_PATH = \"data/student_log.csv\"\r\nGRAPH_PATH       = \"outputs/attention_graph.png\"\r\nSUMMARY_PATH     = \"outputs/summary.txt\"\r\nWEB_PORT         = 5000\r\nDISTRACTION_THRESHOLD = 50.0   # % — below this = distraction event\r\n\r\napp      = Flask(__name__)\r\nsocketio = SocketIO(app, cors_allowed_origins=\"*\", async_mode=\"threading\")\r\n\r\n_state = {\r\n    \"pct\": 0.0, \"avg_pct\": 0.0,\r\n    \"attentive\": 0, \"total\": 0,\r\n    \"fps\": 0.0, \"start_time\": \"—\",\r\n    \"students\": {},        # { \"id\": {\"current\", \"history\", \"att_count\", \"total_count\"} }\r\n    \"timeline\": [],        # [{\"time\", \"pct\"}, ...]\r\n    \"distraction_log\": [], # [{\"time\", \"pct\"}, ...]\r\n    # track running peak/low with their timestamps\r\n    \"peak_pct\": 0.0,   \"peak_time\": \"—\",\r\n    \"low_pct\":  100.0, \"l"
+        "contentPreview": "# ============================================================\r\n# dashboard.py — ClassWatch Web Dashboard\r\n# Beautiful production-ready UI with:\r\n#   • MJPEG camera stream with toggle on/off\r\n#   • Sidebar navigation\r\n#   • Animated KPI cards, gauge, live charts\r\n#   • Distraction log, per-student cards with sparklines\r\n#   • Session summary banner on Q press\r\n#   • Fully responsive dark theme\r\n# ============================================================\r\n\r\nimport threading\r\nimport webbrowser\r\nimport queue\r\nimport cv2\r\nfrom datetime import datetime\r\nfrom flask import Flask, render_template_string, jsonify, Response\r\nfrom flask_socketio import SocketIO\r\nfrom analytics import (compute_statistics, compute_student_scores,\r\n                        generate_graph, generate_summary)\r\nfrom utils import print_section\r\n\r\nLOG_PATH              = \"data/attention_log.csv\"\r\nSTUDENT_LOG_PATH      = \"data/student_log.csv\"\r\nGRAPH_PATH            = \"outputs/attention_graph.png\"\r\nSUMMARY_PATH          = \"outputs/summary.txt\"\r\nWEB_PORT              = 5000\r\nDISTRACTION_THRESHOLD = 50.0\r\n\r\napp      = Flask(__name__)\r\nsocketio = SocketIO(app, cors_allowed_origins=\"*\", async_mode=\"threading\")\r\n\r\n# ── MJPEG frame buffer ────────────────────────────────────────\r\n_frame_queue: \"queue.Queue[bytes]\" = queue.Queue(maxsize=1)\r\n_last_jpeg:   bytes                = b\"\"\r\n_frame_lock   = threading.Lock()\r\n_cam_enabled  = True   # toggled via /toggle_camera\r\n\r\n# ── attention state ────────────────────────────"
       },
       "evidence": [
         "dashboard.py"
@@ -110,8 +117,6 @@
         ],
         "classes": [],
         "functions": [
-          "_ensure_dashboard_api",
-          "_ensure_vision_models",
           "detect_persons",
           "update_tracker",
           "get_attention_state",
@@ -121,7 +126,7 @@
         "isEntry": false,
         "path": "main.py",
         "external": false,
-        "contentPreview": "import cv2\r\nimport contextlib\r\nimport io\r\nimport sys\r\nfrom datetime import datetime\r\n\r\n# ── Project modules ───────────────────────────────────────────────────────────\r\nfrom logger    import AttentionLogger\r\nfrom utils     import (FPSCounter, draw_person_box, draw_hud, ensure_dirs)\r\n\r\n# Instantiate logger (handles 2-second time-gating internally)\r\n_logger = AttentionLogger()\r\n\r\n# ── Config ────────────────────────────────────────────────────────────────────\r\nCAMERA_INDEX      = 0\r\nFRAME_WIDTH       = 1280\r\nFRAME_HEIGHT      = 720\r\nYOLO_MODEL        = \"yolov8n.pt\"\r\nYOLO_CONF         = 0.6\r\nYOLO_DEVICE       = \"cuda\"\r\nSMOOTHING_WINDOW  = 11\r\nPRIVACY_ENABLED   = True\r\nWINDOW_TITLE      = \"ClassWatch — Privacy-Aware Attention System\"\r\n\r\nYAW_THRESHOLD   = 55\r\nPITCH_THRESHOLD = 50\r\n\r\n# ── YOLO + MediaPipe setup ───────────────────────────────────────────────────\r\nimport numpy as np\r\n\r\n_model      = None\r\n_face_det   = None\r\n_face_mesh  = None\r\n_face_models_checked = False\r\n_face_models_ready = False\r\n_tracking_checked = False\r\n_tracking_ready = False\r\n_dashboard_loaded = False\r\n_cuda_checked = False\r\n\r\n\r\ndef _ensure_dashboard_api():\r\n    global _dashboard_loaded, start_web_dashboard, update_student\r\n    global print_live_dashboard, run_final_dashboard\r\n\r\n    if _dashboard_loaded:\r\n        return\r\n\r\n    from dashboard import (start_web_dashboard, update_student,\r\n                           print_live_dashboard, run_final_dashboard)\r\n\r\n    _dashboard_loaded = True\r\n\r\n\r\ndef _ensure_vi"
+        "contentPreview": "\"\"\"\r\nmain.py\r\n-------\r\nFull pipeline entry point.\r\n\r\nRuns:\r\n  Camera → YOLO Detection → ByteTrack → Attention → Privacy → Display\r\n  + Temporal Logging every LOG_INTERVAL seconds\r\n  + On 'q': Analytics → Graph → Summary\r\n\"\"\"\r\n\r\nimport cv2\r\nimport sys\r\nfrom datetime import datetime\r\n\r\n# ── Project modules ───────────────────────────────────────────────────────────\r\nfrom logger    import AttentionLogger\r\nfrom dashboard import (start_web_dashboard, update_student,\r\n                        print_live_dashboard, run_final_dashboard, push_frame)\r\nfrom privacy   import blur_faces\r\nfrom utils     import (FPSCounter, draw_person_box, draw_hud, ensure_dirs)\r\n\r\n# Instantiate logger (handles 2-second time-gating internally)\r\n_logger = AttentionLogger()\r\n\r\n# ── Config ────────────────────────────────────────────────────────────────────\r\nCAMERA_INDEX      = 0\r\nFRAME_WIDTH       = 1280\r\nFRAME_HEIGHT      = 720\r\nYOLO_MODEL        = \"yolov8n.pt\"\r\nYOLO_CONF         = 0.6\r\nYOLO_DEVICE       = \"cuda\"\r\nSMOOTHING_WINDOW  = 11\r\nPRIVACY_ENABLED   = True\r\nWINDOW_TITLE      = \"ClassWatch — Privacy-Aware Attention System\"\r\n\r\nYAW_THRESHOLD   = 55\r\nPITCH_THRESHOLD = 50\r\n\r\n# ── YOLO + MediaPipe setup ───────────────────────────────────────────────────\r\nimport numpy as np\r\nfrom ultralytics import YOLO\r\nimport mediapipe as mp\r\n\r\n_model      = YOLO(YOLO_MODEL)\r\n_model.to(YOLO_DEVICE)\r\n\r\n_mp_fd      = mp.solutions.face_detection\r\n_mp_fm      = mp.solutions.face_mesh\r\n_face_det   = _mp_fd.FaceDetection(model_s"
       },
       "evidence": [
         "main.py"
@@ -303,9 +308,9 @@
       ]
     },
     {
-      "id": "module:3af196a7acc92786",
+      "id": "module:0656f16f30bdda7c",
       "kind": "module",
-      "name": "threading\r\nimport webbrowser\r\nfrom datetime import datetime\r\nfrom flask import Flask",
+      "name": "threading\r\nimport webbrowser\r\nimport queue\r\nimport cv2\r\nfrom datetime import datetime\r\nfrom flask import Flask",
       "properties": {
         "role": "external",
         "language": "python",
@@ -313,7 +318,7 @@
         "classes": [],
         "functions": [],
         "isEntry": false,
-        "path": "threading\r\nimport webbrowser\r\nfrom datetime import datetime\r\nfrom flask import Flask",
+        "path": "threading\r\nimport webbrowser\r\nimport queue\r\nimport cv2\r\nfrom datetime import datetime\r\nfrom flask import Flask",
         "external": true
       },
       "evidence": [
@@ -339,9 +344,9 @@
       ]
     },
     {
-      "id": "module:f6a5374e8d469c09",
+      "id": "module:c643e424791b0c49",
       "kind": "module",
-      "name": "jsonify\r\nfrom flask_socketio import SocketIO\r\nfrom utils import print_section",
+      "name": "jsonify",
       "properties": {
         "role": "external",
         "language": "python",
@@ -349,7 +354,25 @@
         "classes": [],
         "functions": [],
         "isEntry": false,
-        "path": "jsonify\r\nfrom flask_socketio import SocketIO\r\nfrom utils import print_section",
+        "path": "jsonify",
+        "external": true
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "id": "module:de97700a304d0df8",
+      "kind": "module",
+      "name": "Response\r\nfrom flask_socketio import SocketIO",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "Response\r\nfrom flask_socketio import SocketIO",
         "external": true
       },
       "evidence": [
@@ -375,9 +398,9 @@
       ]
     },
     {
-      "id": "module:66b3e11e22ad85ce",
+      "id": "module:bf9b5528377b2600",
       "kind": "module",
-      "name": "cv2\r\nimport contextlib\r\nimport io\r\nimport sys\r\nfrom datetime import datetime",
+      "name": "ultralytics",
       "properties": {
         "role": "external",
         "language": "python",
@@ -385,7 +408,25 @@
         "classes": [],
         "functions": [],
         "isEntry": false,
-        "path": "cv2\r\nimport contextlib\r\nimport io\r\nimport sys\r\nfrom datetime import datetime",
+        "path": "ultralytics",
+        "external": true
+      },
+      "evidence": [
+        "main.py"
+      ]
+    },
+    {
+      "id": "module:af4f8d59fb55a549",
+      "kind": "module",
+      "name": "cv2\r\nimport sys\r\nfrom datetime import datetime",
+      "properties": {
+        "role": "external",
+        "language": "python",
+        "exports": [],
+        "classes": [],
+        "functions": [],
+        "isEntry": false,
+        "path": "cv2\r\nimport sys\r\nfrom datetime import datetime",
         "external": true
       },
       "evidence": [
@@ -570,6 +611,18 @@
     },
     {
       "source": "module:cd508892bb740b72",
+      "target": "module:cc7f523500403f26",
+      "relation": "imports",
+      "properties": {
+        "confidence": "high",
+        "evidence_type": "ast"
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "source": "module:cd508892bb740b72",
       "target": "module:5031d0ea937a7fcb",
       "relation": "imports",
       "properties": {
@@ -582,7 +635,7 @@
     },
     {
       "source": "module:cd508892bb740b72",
-      "target": "module:3af196a7acc92786",
+      "target": "module:0656f16f30bdda7c",
       "relation": "imports",
       "properties": {
         "confidence": "low",
@@ -606,7 +659,19 @@
     },
     {
       "source": "module:cd508892bb740b72",
-      "target": "module:f6a5374e8d469c09",
+      "target": "module:c643e424791b0c49",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "dashboard.py"
+      ]
+    },
+    {
+      "source": "module:cd508892bb740b72",
+      "target": "module:de97700a304d0df8",
       "relation": "imports",
       "properties": {
         "confidence": "low",
@@ -666,6 +731,30 @@
     },
     {
       "source": "module:f1bdda93d9a278e3",
+      "target": "module:cd508892bb740b72",
+      "relation": "imports",
+      "properties": {
+        "confidence": "high",
+        "evidence_type": "ast"
+      },
+      "evidence": [
+        "main.py"
+      ]
+    },
+    {
+      "source": "module:f1bdda93d9a278e3",
+      "target": "module:89be1e9eb936cf02",
+      "relation": "imports",
+      "properties": {
+        "confidence": "high",
+        "evidence_type": "ast"
+      },
+      "evidence": [
+        "main.py"
+      ]
+    },
+    {
+      "source": "module:f1bdda93d9a278e3",
       "target": "module:5031d0ea937a7fcb",
       "relation": "imports",
       "properties": {
@@ -678,7 +767,19 @@
     },
     {
       "source": "module:f1bdda93d9a278e3",
-      "target": "module:66b3e11e22ad85ce",
+      "target": "module:bf9b5528377b2600",
+      "relation": "imports",
+      "properties": {
+        "confidence": "low",
+        "evidence_type": "import-string"
+      },
+      "evidence": [
+        "main.py"
+      ]
+    },
+    {
+      "source": "module:f1bdda93d9a278e3",
+      "target": "module:af4f8d59fb55a549",
       "relation": "imports",
       "properties": {
         "confidence": "low",
@@ -786,16 +887,16 @@
     }
   ],
   "metadata": {
-    "generated_at": "2026-04-15T18:03:46.789Z",
+    "generated_at": "2026-05-12T19:16:33.709Z",
     "workspace_root": "g:\\Projects\\Classwatch\\Privacy-Aware-Collective-Attention-Analysis-System",
-    "node_count": 22,
-    "edge_count": 25,
+    "node_count": 24,
+    "edge_count": 30,
     "stack": "Python Flask · imports: relative imports",
-    "file_hash": "48a86b2857d2bb95",
+    "file_hash": "5000d21058f933de",
     "confidence_counts": {
-      "high": 3,
+      "high": 6,
       "medium": 0,
-      "low": 22
+      "low": 24
     }
   },
   "intelligence": {
@@ -4800,7 +4901,7 @@
           "type": "CO_CHANGES",
           "weight": 1,
           "metadata": {
-            "count": 1
+            "count": 2
           }
         },
         {
@@ -4809,7 +4910,7 @@
           "type": "CO_CHANGES",
           "weight": 1,
           "metadata": {
-            "count": 1
+            "count": 2
           }
         },
         {
@@ -4818,7 +4919,7 @@
           "type": "CO_CHANGES",
           "weight": 1,
           "metadata": {
-            "count": 1
+            "count": 2
           }
         },
         {
@@ -4827,7 +4928,7 @@
           "type": "CO_CHANGES",
           "weight": 1,
           "metadata": {
-            "count": 1
+            "count": 2
           }
         },
         {
@@ -4836,7 +4937,7 @@
           "type": "CO_CHANGES",
           "weight": 1,
           "metadata": {
-            "count": 1
+            "count": 2
           }
         },
         {
@@ -4845,7 +4946,7 @@
           "type": "CO_CHANGES",
           "weight": 1,
           "metadata": {
-            "count": 1
+            "count": 2
           }
         },
         {
@@ -4854,7 +4955,7 @@
           "type": "CO_CHANGES",
           "weight": 1,
           "metadata": {
-            "count": 1
+            "count": 2
           }
         },
         {
@@ -4863,7 +4964,115 @@
           "type": "CO_CHANGES",
           "weight": 1,
           "metadata": {
-            "count": 1
+            "count": 2
+          }
+        },
+        {
+          "source": "FILE::dashboard.py",
+          "target": "FILE::logger.py",
+          "type": "CO_CHANGES",
+          "weight": 1,
+          "metadata": {
+            "count": 2
+          }
+        },
+        {
+          "source": "FILE::logger.py",
+          "target": "FILE::dashboard.py",
+          "type": "CO_CHANGES",
+          "weight": 1,
+          "metadata": {
+            "count": 2
+          }
+        },
+        {
+          "source": "FILE::dashboard.py",
+          "target": "FILE::main.py",
+          "type": "CO_CHANGES",
+          "weight": 1,
+          "metadata": {
+            "count": 2
+          }
+        },
+        {
+          "source": "FILE::main.py",
+          "target": "FILE::dashboard.py",
+          "type": "CO_CHANGES",
+          "weight": 1,
+          "metadata": {
+            "count": 2
+          }
+        },
+        {
+          "source": "FILE::dashboard.py",
+          "target": "FILE::privacy.py",
+          "type": "CO_CHANGES",
+          "weight": 1,
+          "metadata": {
+            "count": 2
+          }
+        },
+        {
+          "source": "FILE::privacy.py",
+          "target": "FILE::dashboard.py",
+          "type": "CO_CHANGES",
+          "weight": 1,
+          "metadata": {
+            "count": 2
+          }
+        },
+        {
+          "source": "FILE::logger.py",
+          "target": "FILE::main.py",
+          "type": "CO_CHANGES",
+          "weight": 1,
+          "metadata": {
+            "count": 2
+          }
+        },
+        {
+          "source": "FILE::main.py",
+          "target": "FILE::logger.py",
+          "type": "CO_CHANGES",
+          "weight": 1,
+          "metadata": {
+            "count": 2
+          }
+        },
+        {
+          "source": "FILE::logger.py",
+          "target": "FILE::privacy.py",
+          "type": "CO_CHANGES",
+          "weight": 1,
+          "metadata": {
+            "count": 2
+          }
+        },
+        {
+          "source": "FILE::privacy.py",
+          "target": "FILE::logger.py",
+          "type": "CO_CHANGES",
+          "weight": 1,
+          "metadata": {
+            "count": 2
+          }
+        },
+        {
+          "source": "FILE::main.py",
+          "target": "FILE::privacy.py",
+          "type": "CO_CHANGES",
+          "weight": 1,
+          "metadata": {
+            "count": 2
+          }
+        },
+        {
+          "source": "FILE::privacy.py",
+          "target": "FILE::main.py",
+          "type": "CO_CHANGES",
+          "weight": 1,
+          "metadata": {
+            "count": 2
           }
         },
         {
@@ -4886,60 +5095,6 @@
         },
         {
           "source": "FILE::dashboard.py",
-          "target": "FILE::logger.py",
-          "type": "CO_CHANGES",
-          "weight": 1,
-          "metadata": {
-            "count": 1
-          }
-        },
-        {
-          "source": "FILE::logger.py",
-          "target": "FILE::dashboard.py",
-          "type": "CO_CHANGES",
-          "weight": 1,
-          "metadata": {
-            "count": 1
-          }
-        },
-        {
-          "source": "FILE::dashboard.py",
-          "target": "FILE::main.py",
-          "type": "CO_CHANGES",
-          "weight": 1,
-          "metadata": {
-            "count": 1
-          }
-        },
-        {
-          "source": "FILE::main.py",
-          "target": "FILE::dashboard.py",
-          "type": "CO_CHANGES",
-          "weight": 1,
-          "metadata": {
-            "count": 1
-          }
-        },
-        {
-          "source": "FILE::dashboard.py",
-          "target": "FILE::privacy.py",
-          "type": "CO_CHANGES",
-          "weight": 1,
-          "metadata": {
-            "count": 1
-          }
-        },
-        {
-          "source": "FILE::privacy.py",
-          "target": "FILE::dashboard.py",
-          "type": "CO_CHANGES",
-          "weight": 1,
-          "metadata": {
-            "count": 1
-          }
-        },
-        {
-          "source": "FILE::dashboard.py",
           "target": "FILE::utils.py",
           "type": "CO_CHANGES",
           "weight": 1,
@@ -4958,42 +5113,6 @@
         },
         {
           "source": "FILE::logger.py",
-          "target": "FILE::main.py",
-          "type": "CO_CHANGES",
-          "weight": 1,
-          "metadata": {
-            "count": 1
-          }
-        },
-        {
-          "source": "FILE::main.py",
-          "target": "FILE::logger.py",
-          "type": "CO_CHANGES",
-          "weight": 1,
-          "metadata": {
-            "count": 1
-          }
-        },
-        {
-          "source": "FILE::logger.py",
-          "target": "FILE::privacy.py",
-          "type": "CO_CHANGES",
-          "weight": 1,
-          "metadata": {
-            "count": 1
-          }
-        },
-        {
-          "source": "FILE::privacy.py",
-          "target": "FILE::logger.py",
-          "type": "CO_CHANGES",
-          "weight": 1,
-          "metadata": {
-            "count": 1
-          }
-        },
-        {
-          "source": "FILE::logger.py",
           "target": "FILE::utils.py",
           "type": "CO_CHANGES",
           "weight": 1,
@@ -5004,24 +5123,6 @@
         {
           "source": "FILE::utils.py",
           "target": "FILE::logger.py",
-          "type": "CO_CHANGES",
-          "weight": 1,
-          "metadata": {
-            "count": 1
-          }
-        },
-        {
-          "source": "FILE::main.py",
-          "target": "FILE::privacy.py",
-          "type": "CO_CHANGES",
-          "weight": 1,
-          "metadata": {
-            "count": 1
-          }
-        },
-        {
-          "source": "FILE::privacy.py",
-          "target": "FILE::main.py",
           "type": "CO_CHANGES",
           "weight": 1,
           "metadata": {
