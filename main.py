@@ -1,251 +1,217 @@
-"""
-main.py
--------
-Full pipeline entry point.
-
-Runs:
-  Camera → YOLO Detection → ByteTrack → Attention → Privacy → Display
-  + Temporal Logging every LOG_INTERVAL seconds
-  + On 'q': Analytics → Graph → Summary
-"""
+# ============================================================
+# main.py — ClassWatch Entry Point
+# Production-ready: headless-safe, graceful shutdown,
+# config from .env, no hardcoded values.
+# ============================================================
 
 import cv2
 import sys
+import signal
+import threading
+import numpy as np
 from datetime import datetime
+from collections import defaultdict
 
-# ── Project modules ───────────────────────────────────────────────────────────
+# ── Config (reads .env) ───────────────────────────────────────
+from config import (
+    CAMERA_INDEX, FRAME_WIDTH, FRAME_HEIGHT,
+    YOLO_MODEL, YOLO_CONF, YOLO_DEVICE, YOLO_MAX_DET,
+    SMOOTHING_WINDOW, YAW_THRESHOLD, PITCH_THRESHOLD,
+    PRIVACY_ENABLED,
+)
+
+# ── Project modules ───────────────────────────────────────────
 from logger    import AttentionLogger
 from dashboard import (start_web_dashboard, update_student,
-                        print_live_dashboard, run_final_dashboard, push_frame)
+                        print_live_dashboard, run_final_dashboard,
+                        push_frame, register_shutdown)
 from privacy   import blur_faces
-from utils     import (FPSCounter, draw_person_box, draw_hud, ensure_dirs)
+from utils     import FPSCounter, draw_person_box, draw_hud, ensure_dirs
 
-# Instantiate logger (handles 2-second time-gating internally)
-_logger = AttentionLogger()
-
-# ── Config ────────────────────────────────────────────────────────────────────
-CAMERA_INDEX      = 0
-FRAME_WIDTH       = 1280
-FRAME_HEIGHT      = 720
-YOLO_MODEL        = "yolov8n.pt"
-YOLO_CONF         = 0.6
-YOLO_DEVICE       = "cuda"
-SMOOTHING_WINDOW  = 11
-PRIVACY_ENABLED   = True
-WINDOW_TITLE      = "ClassWatch — Privacy-Aware Attention System"
-
-YAW_THRESHOLD   = 55
-PITCH_THRESHOLD = 50
-
-# ── YOLO + MediaPipe setup ───────────────────────────────────────────────────
+# ── YOLO + MediaPipe ──────────────────────────────────────────
 import numpy as np
 from ultralytics import YOLO
 import mediapipe as mp
 
-_model      = YOLO(YOLO_MODEL)
+_model = YOLO(YOLO_MODEL)
 _model.to(YOLO_DEVICE)
 
-_mp_fd      = mp.solutions.face_detection
-_mp_fm      = mp.solutions.face_mesh
-_face_det   = _mp_fd.FaceDetection(model_selection=1, min_detection_confidence=0.3)
-_face_mesh  = _mp_fm.FaceMesh(refine_landmarks=True, max_num_faces=1)
+_mp_fd     = mp.solutions.face_detection
+_mp_fm     = mp.solutions.face_mesh
+_face_det  = _mp_fd.FaceDetection(model_selection=1, min_detection_confidence=0.3)
+_face_mesh = _mp_fm.FaceMesh(refine_landmarks=True, max_num_faces=1)
 
-# Track IDs assigned by ByteTrack across frames
-_track_id_map = {}   # internal YOLO track-id → stable int
+# ── Logger ────────────────────────────────────────────────────
+_logger = AttentionLogger()
 
+# ── Smoothing ─────────────────────────────────────────────────
+def _smooth(history: list, window: int) -> str:
+    recent = history[-window:]
+    return max(set(recent), key=recent.count)
 
-def detect_persons(frame):
-    """Run YOLO + ByteTrack. Returns [(x1,y1,x2,y2,track_id), ...]."""
-    results = _model.track(
-        frame, persist=True,
-        tracker="bytetrack.yaml",
-        conf=YOLO_CONF,
-        verbose=False
-    )
-    out = []
-    for r in results:
-        if r.boxes is None:
-            continue
-        for box in r.boxes:
-            if int(box.cls[0]) != 0:   # person class only
-                continue
-            if box.id is None:
-                continue
-            tid = int(box.id[0])
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            out.append((x1, y1, x2, y2, tid))
-    return out
-
-
-def update_tracker(frame, detections):
-    """Tracker already handled inside detect_persons via ByteTrack."""
-    return detections   # pass-through
-
-
+# ── Head-pose attention ───────────────────────────────────────
 def get_attention_state(frame, box):
-    """
-    Head-pose estimation via MediaPipe Face Mesh.
-    Returns "Attentive" or "Distracted".
-    Thresholds: YAW_THRESHOLD, PITCH_THRESHOLD (defined in Config).
-    """
     x1, y1, x2, y2 = box
     pad = 15
     h_f, w_f = frame.shape[:2]
-    cx1 = max(0, x1 - pad);  cy1 = max(0, y1 - pad)
-    cx2 = min(w_f, x2 + pad); cy2 = min(h_f, y2 + pad)
+    cx1 = max(0, x1-pad); cy1 = max(0, y1-pad)
+    cx2 = min(w_f, x2+pad); cy2 = min(h_f, y2+pad)
     crop = frame[cy1:cy2, cx1:cx2]
     if crop.size == 0:
         return "Distracted"
-
     rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
     fd  = _face_det.process(rgb)
     if not fd.detections:
-        return "Distracted"   # no face visible = distracted
-
+        return "Distracted"
     det = fd.detections[0]
     bb  = det.location_data.relative_bounding_box
     ch, cw = crop.shape[:2]
     fx1 = max(0, int(bb.xmin * cw))
     fy1 = max(0, int(bb.ymin * ch))
-    fx2 = min(cw, int((bb.xmin + bb.width)  * cw))
+    fx2 = min(cw, int((bb.xmin + bb.width) * cw))
     fy2 = min(ch, int((bb.ymin + bb.height) * ch))
     face = crop[fy1:fy2, fx1:fx2]
     if face.size == 0:
         return "Distracted"
-
-    mesh = _face_mesh.process(cv2.cvtColor(face, cv2.COLOR_BGR2RGB))
-    if not mesh.multi_face_landmarks:
+    mr = _face_mesh.process(cv2.cvtColor(face, cv2.COLOR_BGR2RGB))
+    if not mr.multi_face_landmarks:
         return "Distracted"
-
-    lms = mesh.multi_face_landmarks[0]
+    lms = mr.multi_face_landmarks[0]
     fh, fw = face.shape[:2]
     p2d, p3d = [], []
     for idx, lm in enumerate(lms.landmark):
         if idx in [33, 263, 1, 61, 291, 199]:
-            px, py = int(lm.x * fw), int(lm.y * fh)
-            p2d.append([px, py])
-            p3d.append([px, py, lm.z])
+            px, py = int(lm.x*fw), int(lm.y*fh)
+            p2d.append([px, py]); p3d.append([px, py, lm.z])
     if len(p2d) < 6:
         return "Distracted"
-
     p2d = np.array(p2d, dtype=np.float64)
     p3d = np.array(p3d, dtype=np.float64)
-    cam  = np.array([[fw, 0, fw/2], [0, fw, fh/2], [0, 0, 1]], dtype=np.float64)
-    dist = np.zeros((4, 1), dtype=np.float64)
+    cam  = np.array([[fw,0,fw/2],[0,fw,fh/2],[0,0,1]], dtype=np.float64)
+    dist = np.zeros((4,1), dtype=np.float64)
     ok, rvec, _ = cv2.solvePnP(p3d, p2d, cam, dist)
     if not ok:
         return "Distracted"
-
     rmat, _ = cv2.Rodrigues(rvec)
     angles, *_ = cv2.RQDecomp3x3(rmat)
     pitch = angles[0] * 360
     yaw   = angles[1] * 360
-
     if abs(yaw) < YAW_THRESHOLD and abs(pitch) < PITCH_THRESHOLD:
         return "Attentive"
     return "Distracted"
 
+# ── Graceful shutdown flag ────────────────────────────────────
+_stop_event = threading.Event()
 
-# ── Smoothing helper ──────────────────────────────────────────────────────────
-def _smooth(history: list, window: int) -> str:
-    recent = history[-window:]
-    return max(set(recent), key=recent.count)
+def _signal_handler(sig, frame):
+    print("\n[main] Signal received — shutting down…")
+    _stop_event.set()
 
+signal.signal(signal.SIGINT,  _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main loop
-# ─────────────────────────────────────────────────────────────────────────────
-
-def main() -> None:
+# ── Main loop ─────────────────────────────────────────────────
+def main():
     ensure_dirs("data", "outputs")
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
         print(f"[main] ERROR: Cannot open camera index {CAMERA_INDEX}.")
         sys.exit(1)
-
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
 
     fps_counter    = FPSCounter(window=30)
     session_start  = datetime.now().strftime("%H:%M:%S")
-    student_history: dict = {}   # { track_id: [state, ...] }
+    student_history: dict = {}
+    _sum_pct  = 0.0
+    _frame_idx = 0
 
-    # Start web dashboard in background thread (opens browser automatically)
+    # Register shutdown callback so browser /shutdown route works too
+    register_shutdown(_stop_event)
+
+    # Start web dashboard (opens browser automatically)
     start_web_dashboard()
 
-    print("\n  ┌─────────────────────────────────────────┐")
-    print("  │  ClassWatch — Attention Analysis System  │")
-    print("  │  Dashboard → http://localhost:5000        │")
-    print("  │  Press  q  to stop and generate reports  │")
-    print("  └─────────────────────────────────────────┘\n")
+    print("\n  ┌──────────────────────────────────────────────┐")
+    print("  │  ClassWatch — Attention Analysis System       │")
+    print("  │  Dashboard  →  http://localhost:5000          │")
+    print("  │  Press  q   or Ctrl-C to stop                │")
+    print("  └──────────────────────────────────────────────┘\n")
 
-    while True:
+    while not _stop_event.is_set():
         ret, frame = cap.read()
         if not ret:
             print("\n[main] Camera read failed — stopping.")
             break
 
         frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
+        _frame_idx += 1
 
-        # ── 1. Detect persons ─────────────────────────────
-        detections = detect_persons(frame)          # [(x1,y1,x2,y2,conf), ...]
+        # ── Detect + Track ────────────────────────────────
+        results = _model.track(
+            frame, persist=True,
+            tracker="bytetrack.yaml",
+            conf=YOLO_CONF,
+            max_det=YOLO_MAX_DET,
+            verbose=False
+        )
 
-        # ── 2. Track ──────────────────────────────────────
-        tracked = update_tracker(frame, detections) # [(x1,y1,x2,y2,id), ...]
+        attentive = 0; total = 0
+        blur_dets: list[dict] = []
+        current_states: dict = {}
 
-        # ── 3. Attention + smoothing ──────────────────────
-        current_states = {}
-        for (x1, y1, x2, y2, tid) in tracked:
-            state = get_attention_state(frame, (x1, y1, x2, y2))
-            student_history.setdefault(tid, []).append(state)
-            smoothed = _smooth(student_history[tid], SMOOTHING_WINDOW)
-            current_states[tid] = smoothed
-            update_student(tid, smoothed)           # push to web dashboard
+        for r in results:
+            if r.boxes is None: continue
+            for box in r.boxes:
+                if int(box.cls[0]) != 0 or box.id is None: continue
+                tid = int(box.id[0])
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                total += 1
+                blur_dets.append({"x1":x1,"y1":y1,"x2":x2,"y2":y2})
 
-        # ── 4. Privacy: blur faces ────────────────────────
-        if PRIVACY_ENABLED and tracked:
-            blur_dets = [{"x1":x1,"y1":y1,"x2":x2,"y2":y2}
-                         for (x1,y1,x2,y2,_) in tracked]
+                raw = get_attention_state(frame, (x1, y1, x2, y2))
+                student_history.setdefault(tid, []).append(raw)
+                smoothed = _smooth(student_history[tid], SMOOTHING_WINDOW)
+                current_states[tid] = smoothed
+
+                update_student(tid, smoothed)
+
+                if smoothed == "Attentive":
+                    attentive += 1
+                draw_person_box(frame, x1, y1, x2, y2, tid, smoothed)
+
+        # ── Privacy ───────────────────────────────────────
+        if PRIVACY_ENABLED and blur_dets:
             blur_faces(frame, blur_dets)
 
-        # ── 5. Draw bounding boxes + labels ──────────────
-        for (x1, y1, x2, y2, tid) in tracked:
-            draw_person_box(frame, x1, y1, x2, y2, tid, current_states[tid])
+        # ── HUD ───────────────────────────────────────────
+        fps = fps_counter.tick()
+        draw_hud(frame, attentive, total, fps, PRIVACY_ENABLED)
 
-        # ── 6. Compute counts ────────────────────────────
-        attentive  = sum(1 for s in current_states.values() if s == "Attentive")
-        total      = len(current_states)
-        distracted = total - attentive
-
-        # ── 7. Log (time-gated inside logger.py) ─────────
+        # ── Log ───────────────────────────────────────────
         _logger.log_attention({
             "attentive_count": attentive,
             "total_students":  total,
         })
 
-        # ── 8. HUD overlay ───────────────────────────────
-        fps = fps_counter.tick()
-        draw_hud(frame, attentive, total, fps, PRIVACY_ENABLED)
-
-        # ── 9. Push live data to web dashboard ───────────
-        avg_pct = round(attentive / total * 100, 1) if total else 0.0
+        # ── Dashboard push ────────────────────────────────
+        _sum_pct += (attentive / total * 100) if total else 0.0
+        avg_pct   = round(_sum_pct / _frame_idx, 1)
         print_live_dashboard(attentive, total, avg_pct, session_start, fps)
 
-        # ── 10. Display ──────────────────────────────────
-        # Stream processed frame to browser instead of opening OpenCV window
+        # ── Stream frame to browser ───────────────────────
         push_frame(frame)
 
-        # Still check keyboard q via waitKey with a short delay (no window shown)
+        # ── Headless-safe quit check ──────────────────────
+        # waitKey(1) works fine with no window — returns -1 silently
         if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+            _stop_event.set()
 
-    # ── Cleanup ───────────────────────────────────────────
+    # ── Cleanup ───────────────────────────────────────────────
     cap.release()
     cv2.destroyAllWindows()
     print("\n\n  Stopping capture…\n")
-
-    # ── Post-session analytics + summary ──────────────────
     run_final_dashboard()
 
 

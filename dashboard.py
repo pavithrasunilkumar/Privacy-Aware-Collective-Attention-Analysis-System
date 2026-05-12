@@ -19,15 +19,14 @@ from flask_socketio import SocketIO
 from analytics import (compute_statistics, compute_student_scores,
                         generate_graph, generate_summary)
 from utils import print_section
-
-LOG_PATH              = "data/attention_log.csv"
-STUDENT_LOG_PATH      = "data/student_log.csv"
-GRAPH_PATH            = "outputs/attention_graph.png"
-SUMMARY_PATH          = "outputs/summary.txt"
-WEB_PORT              = 5000
-DISTRACTION_THRESHOLD = 50.0
+from config import (
+    WEB_PORT, WEB_HOST, SECRET_KEY, STREAM_PASSWORD,
+    LOG_PATH, STUDENT_LOG_PATH, GRAPH_PATH, SUMMARY_PATH,
+    DISTRACTION_THRESHOLD,
+)
 
 app      = Flask(__name__)
+app.config['SECRET_KEY'] = SECRET_KEY
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 # ── MJPEG frame buffer ────────────────────────────────────────
@@ -447,6 +446,11 @@ canvas{display:block}
           </label>
           <span>Camera</span>
         </label>
+        <!-- Stop session button -->
+        <button class="btn btn-red btn-sm" id="stop-btn" onclick="stopSession()" title="Stop session and generate analytics">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+          Stop Session
+        </button>
         <!-- Session badge -->
         <div class="badge badge-live" id="session-badge">
           <div class="pulse"></div>LIVE
@@ -932,6 +936,16 @@ socket.on('attention_update',d=>{
 const vid=document.getElementById('videoFeed');
 vid.onload=()=>{ document.getElementById('stream-label').textContent='live ✓'; };
 vid.onerror=()=>{ document.getElementById('stream-label').textContent='no signal'; };
+
+// ── STOP SESSION ─────────────────────────────────────────────
+function stopSession(){
+  if(!confirm('Stop the session and generate analytics?')) return;
+  document.getElementById('stop-btn').disabled=true;
+  document.getElementById('stop-btn').textContent='Stopping…';
+  fetch('/shutdown',{method:'POST'})
+    .then(()=>showToast('Session stopping…','⏹','#ffb347'))
+    .catch(()=>showToast('Send q in terminal to stop','⌨','#ffb347'));
+}
 </script>
 </body>
 </html>"""
@@ -959,9 +973,31 @@ def toggle_camera():
     _cam_enabled = bool(data.get("enabled", True))
     return jsonify({"ok": True, "enabled": _cam_enabled})
 
+# ── Shutdown endpoint (called by browser Stop button or Ctrl-C) ──
+_stop_event_ref = None
+
+def register_shutdown(event):
+    """Called by main.py to give dashboard a handle to the stop event."""
+    global _stop_event_ref
+    _stop_event_ref = event
+
+@app.route("/shutdown", methods=["POST"])
+def shutdown():
+    """Graceful shutdown — stops the main detection loop."""
+    if _stop_event_ref is not None:
+        _stop_event_ref.set()
+    return jsonify({"ok": True})
+
 @app.route("/video_feed")
 def video_feed():
     """MJPEG stream — served to <img src='/video_feed'>."""
+    # Optional stream password check
+    from flask import request as _req
+    if STREAM_PASSWORD:
+        auth = _req.args.get("pwd", "")
+        if auth != STREAM_PASSWORD:
+            return Response("Unauthorized", status=401)
+
     def generate():
         global _last_jpeg
         while True:
@@ -1054,7 +1090,7 @@ def update_student(track_id: int, state: str):
 
 def start_web_dashboard():
     def _run():
-        socketio.run(app, host="0.0.0.0", port=WEB_PORT,
+        socketio.run(app, host=WEB_HOST, port=WEB_PORT,
                      debug=False, use_reloader=False, log_output=False)
     threading.Thread(target=_run, daemon=True).start()
     threading.Timer(1.4, lambda: webbrowser.open(f"http://localhost:{WEB_PORT}")).start()

@@ -1,39 +1,115 @@
+# =========================================================
+# ClassWatch — .gitignore
+# =========================================================
+
+# ---------------------------------------------------------
 # Python
-__pycache__/
-*.pyc
-*.pyo
+# ---------------------------------------------------------
 __pycache__/
 *.py[cod]
 *.pyd
+*.pyo
 .Python
 
-# Virtual Environment
+# Distribution / build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Testing / cache
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ---------------------------------------------------------
+# Virtual Environments
+# ---------------------------------------------------------
 venv/
 env/
 .venv/
 
-# Data files
-data/
-outputs/
-*.csv
-*.log
+# ---------------------------------------------------------
+# Environment Variables / Secrets
+# ---------------------------------------------------------
+.env
+.env.*
+!.env.example
 
-# OS files
+# ---------------------------------------------------------
+# IDEs / Editors
+# ---------------------------------------------------------
+.vscode/
+.idea/
+
+# ---------------------------------------------------------
+# OS Files
+# ---------------------------------------------------------
 .DS_Store
 Thumbs.db
 
-# VS Code
-.vscode/
+# ---------------------------------------------------------
+# Runtime Data / Outputs
+# ---------------------------------------------------------
+data/
+outputs/
+runs/
+logs/
 
-# Secrets
-.env
-# ArchitectIQ graph cache
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# CSV exports
+*.csv
+
+# ---------------------------------------------------------
+# AI / Model Files
+# ---------------------------------------------------------
+# Download separately
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+
+# YOLO / Ultralytics cache
+datasets/
+weights/
+
+# ---------------------------------------------------------
+# Media / Generated Files
+# ---------------------------------------------------------
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Screenshots / generated images
+screenshots/
+captures/
+
+# ---------------------------------------------------------
+# Deployment
+# ---------------------------------------------------------
+*.pid
+gunicorn.log
+
+# ---------------------------------------------------------
+# ArchitectIQ
+# ---------------------------------------------------------
 .architectiq/
 
-# Environment
-.env
+# ---------------------------------------------------------
+# Optional audio cache
+# ---------------------------------------------------------
+_sounddevice_data/
 
-# YOLO model weights (download separately)
-*.pt
-*.onnx
-
+# ---------------------------------------------------------
+# CUDA / Torch temporary cache
+# ---------------------------------------------------------
+torch_compile_debug/
