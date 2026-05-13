@@ -278,7 +278,7 @@ Ensure your CUDA drivers and CUDA-enabled PyTorch build are installed correctly.
 | [Chart.js](https://www.chartjs.org) | Browser-side charts |
 | [Matplotlib](https://matplotlib.org) | Post-session graph image |
 
-# 👩‍💻 Author
+# Author
 
 ## Saksham Midha and Pavithra Sunilkumar 
 
