@@ -1,6 +1,5 @@
 # ============================================================
 # dashboard.py — ClassWatch Web Dashboard
-# Beautiful production-ready UI with:
 #   • MJPEG camera stream with toggle on/off
 #   • Sidebar navigation
 #   • Animated KPI cards, gauge, live charts
@@ -24,6 +23,7 @@ from config import (
     LOG_PATH, STUDENT_LOG_PATH, GRAPH_PATH, SUMMARY_PATH,
     DISTRACTION_THRESHOLD,
 )
+
 
 app      = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
