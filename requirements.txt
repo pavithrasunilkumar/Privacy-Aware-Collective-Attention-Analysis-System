@@ -1,8 +1,3 @@
-# =========================================================
-# ClassWatch — Production Requirements
-# Stable AI / CV deployment environment
-# Optimized for Flask + SocketIO threading mode
-# =========================================================
 
 # ---------------------------------------------------------
 # Deep Learning / GPU
